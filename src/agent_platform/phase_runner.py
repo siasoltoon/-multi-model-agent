@@ -10,6 +10,7 @@ from .discovery import env_api_key
 from .models import Task
 from .provider_api_catalog import get_api_contract
 from .provider_connections import build_provider_adapter
+from .provider_registry import get_provider
 from .router import SmartRouter
 from .workspace_tools import WorkspaceTools
 
@@ -34,8 +35,10 @@ def _api_key(endpoint) -> str:
 
 
 def _build_adapter(endpoint, timeout: float):
-    # Verified remote providers must use their explicit API contract. Local or
-    # legacy endpoints (for example Ollama) retain the generic adapter path.
+    definition = get_provider(endpoint.provider)
+    # Native providers have dedicated request/response translation.
+    if definition.adapter in {"openai", "anthropic", "gemini"}:
+        return build_provider_adapter(endpoint.provider, model=endpoint.model, timeout=timeout, api_key=_api_key(endpoint))
     if get_api_contract(endpoint.provider) is not None:
         return build_provider_adapter(endpoint.provider, model=endpoint.model, timeout=timeout, api_key=_api_key(endpoint))
     return OpenAICompatibleAdapter(endpoint.base_url, _api_key(endpoint), endpoint.model, timeout=timeout)
@@ -88,7 +91,6 @@ class PhaseRunner:
         prior: list[dict[str, Any]] = []
         total_steps = 0
         total_repairs = 0
-
         for role in ROLE_ORDER:
             if monotonic() - started >= self.task_timeout:
                 return {"status": "failed", "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
@@ -115,5 +117,4 @@ class PhaseRunner:
                 self.on_phase(record)
             if result.get("status") != "completed":
                 return {"status": "failed", "error": f"{role} phase failed: {result.get('error', 'unknown error')}", "failed_phase": role, "phases": phases, "steps": total_steps, "repairs": total_repairs}
-
         return {"status": "completed", "phases": phases, "steps": total_steps, "repairs": total_repairs, "models_used": [f"{p['provider']}/{p['model']}" for p in phases], "roles_completed": [p["role"] for p in phases]}
