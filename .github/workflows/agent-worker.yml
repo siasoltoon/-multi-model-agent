@@ -88,9 +88,9 @@ jobs:
         run: |
           git config user.name 'multi-model-agent[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          rm -f .agent-result.json
           if [ -z "$(git status --porcelain)" ]; then exit 0; fi
           git add -A
+          git reset -- .agent-result.json 2>/dev/null || true
           git commit -m 'agent: apply verified task progress' || true
           git push --set-upstream origin "$WORKING_BRANCH"
       - name: Open or update PR
@@ -119,15 +119,13 @@ jobs:
           import json, os, urllib.request
           path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'workspace', '.agent-result.json')
           if os.path.exists(path):
-              payload = json.load(open(path, encoding='utf-8'))
+              with open(path, encoding='utf-8') as f: payload = json.load(f)
           else:
               payload = {'status': 'failed', 'error': 'worker ended before producing a result'}
           payload.update({'task_id': os.environ['TASK_ID'], 'run_id': os.environ['RUN_ID'], 'worker_id': os.environ['WORKER_ID']})
           data = json.dumps(payload, ensure_ascii=False, default=str).encode()
           request = urllib.request.Request(os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/worker-callback', data=data, headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + os.environ.get('CALLBACK_TOKEN','')}, method='POST')
           try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  print(response.read().decode())
-          except Exception as exc:
-              print('callback warning:', exc)
+              with urllib.request.urlopen(request, timeout=30) as response: print(response.read().decode())
+          except Exception as exc: print('callback warning:', exc)
           PY
