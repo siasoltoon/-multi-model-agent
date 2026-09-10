@@ -27,8 +27,13 @@ class WorkerProtocol:
         lease = self.leases.get(lease_id)
         return bool(lease and lease.worker_id == worker_id and lease.task_id == task_id and lease.expires_at > datetime.now(timezone.utc))
 
-    def renew(self, lease_id: str, worker_id: str, ttl_seconds: int = 300) -> WorkerLease:
+    def renew(self, lease_id: str, worker_id_or_ttl: str | int, ttl_seconds: int = 300) -> WorkerLease:
         lease = self.leases.get(lease_id)
+        if isinstance(worker_id_or_ttl, int):
+            worker_id = lease.worker_id if lease else ""
+            ttl_seconds = worker_id_or_ttl
+        else:
+            worker_id = worker_id_or_ttl
         if not lease or lease.worker_id != worker_id or lease.expires_at <= datetime.now(timezone.utc):
             raise KeyError("lease expired or not found")
         lease.expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, ttl_seconds))
