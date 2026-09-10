@@ -3,6 +3,10 @@ name: agent-worker
 on:
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Control-plane task UUID
+        required: true
+        type: string
       task_prompt:
         description: Coding task for the agent
         required: true
@@ -13,13 +17,22 @@ on:
         default: '64'
         type: string
       repository:
-        description: Target repository, e.g. owner/name
+        description: Target repository
         required: true
         type: string
       base_branch:
-        description: Branch to base the agent change on
+        description: Base branch
         required: false
         default: main
+        type: string
+      working_branch:
+        description: Persistent worker branch
+        required: true
+        type: string
+      callback_url:
+        description: Control-plane callback URL
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -36,40 +49,62 @@ jobs:
         with:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.base_branch }}
-          token: ${{ secrets.AGENT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.AGENT_GITHUB_TOKEN }}
           path: workspace
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Prepare persistent branch
+        working-directory: workspace
+        env:
+          WORKING_BRANCH: ${{ inputs.working_branch }}
+        run: |
+          git fetch origin --prune
+          if git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
+            git checkout -B "$WORKING_BRANCH" "origin/$WORKING_BRANCH"
+          else
+            git checkout -B "$WORKING_BRANCH"
+          fi
       - name: Install agent
         run: pip install -e '.[dev]'
       - name: Execute agent
         env:
           AGENT_TASK_PROMPT: ${{ inputs.task_prompt }}
+          AGENT_TASK_ID: ${{ inputs.task_id }}
           AGENT_MAX_STEPS: ${{ inputs.max_steps }}
           AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
           AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+          AGENT_CALLBACK_URL: ${{ inputs.callback_url }}
+          AGENT_CALLBACK_TOKEN: ${{ secrets.AGENT_CALLBACK_TOKEN }}
+          AGENT_WORKER_ID: github-actions-${{ github.run_id }}
         run: python -m agent_platform.worker_entry
-      - name: Commit and open PR
+      - name: Commit and push progress
+        if: always()
         working-directory: workspace
         env:
-          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
-          TARGET_REPOSITORY: ${{ inputs.repository }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          WORKING_BRANCH: ${{ inputs.working_branch }}
         run: |
           git config user.name 'multi-model-agent[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [ -z "$(git status --porcelain)" ]; then
-            echo 'No verified changes produced.'
-            exit 0
-          fi
-          BRANCH="agent/task-${GITHUB_RUN_ID}"
-          git checkout -b "$BRANCH"
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
           git add -A
-          git commit -m 'agent: apply verified task changes'
-          git push --set-upstream origin "$BRANCH"
-          gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" --title 'agent: verified task changes' --body "Automated coding-agent run ${GITHUB_RUN_ID}. Changes were produced by the bounded worker loop."
+          git commit -m 'agent: apply verified task progress' || true
+          git push --set-upstream origin "$WORKING_BRANCH"
+      - name: Open or update PR
+        if: always()
+        working-directory: workspace
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          WORKING_BRANCH: ${{ inputs.working_branch }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          if gh pr view "$WORKING_BRANCH" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
+          if [ "$(git rev-list --count "origin/$BASE_BRANCH..HEAD")" -gt 0 ]; then
+            gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$WORKING_BRANCH" --title 'agent: verified task changes' --body 'Resumable automated coding-agent task.'
+          fi
