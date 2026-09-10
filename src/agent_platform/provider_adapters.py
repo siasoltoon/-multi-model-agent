@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -184,7 +185,7 @@ class OpenAICompatibleProvider:
                     if data == "[DONE]":
                         break
                     try:
-                        chunk = httpx.Response(200, json={}).json() if False else __import__("json").loads(data)
+                        chunk = json.loads(data)
                     except (ValueError, TypeError):
                         continue
                     choices = chunk.get("choices", []) if isinstance(chunk, dict) else []
