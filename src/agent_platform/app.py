@@ -73,7 +73,7 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def terminal():
-    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · automatic worker resume</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create + Run</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});let t=await r.json();if(r.ok){await fetch('/api/tasks/'+t.id+'/dispatch',{method:'POST'});watch(t.id)}o.textContent=JSON.stringify(t,null,2)}async function watch(id){let es=new EventSource('/api/tasks/'+id+'/stream');es.onmessage=e=>o.textContent=JSON.stringify(JSON.parse(e.data),null,2);es.onerror=()=>es.close()}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
+    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · automatic worker resume</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create + Run</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});let t=await r.json();if(r.ok){let d=await fetch('/api/tasks/'+t.id+'/dispatch',{method:'POST'});t=await d.json();watch(t.id||JSON.parse(await (await fetch('/api/tasks/'+t.id)).text()).id)}o.textContent=JSON.stringify(t,null,2)}async function watch(id){let es=new EventSource('/api/tasks/'+id+'/stream');es.addEventListener('task',e=>o.textContent=JSON.stringify(JSON.parse(e.data),null,2));es.onerror=()=>es.close()}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
 
 
 @app.post("/api/providers/discover")
@@ -131,9 +131,10 @@ def _dispatch(task: Task) -> dict:
         raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
     dispatcher = GitHubActionsDispatcher(settings.github_token)
     branch = str(task.metadata.get("worker_branch") or f"agent/task-{task.id}")
-    task.metadata["repository"] = repository
-    task.metadata["worker_branch"] = branch
-    task.metadata["worker_workflow"] = settings.github_worker_workflow
+    callback_url = str(task.metadata.get("callback_url") or settings.public_base_url).rstrip("/")
+    if not callback_url:
+        raise HTTPException(400, "AGENT_PUBLIC_BASE_URL is required for automatic worker callbacks")
+    task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": settings.github_worker_workflow, "callback_url": callback_url})
     task.attempts += 1
     task.status = TaskStatus.RUNNING
     store.save(task)
@@ -141,7 +142,7 @@ def _dispatch(task: Task) -> dict:
     return dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
         "task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps),
         "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)),
-        "working_branch": branch, "callback_url": str(task.metadata.get("callback_url", "")),
+        "working_branch": branch, "callback_url": callback_url,
     })
 
 
