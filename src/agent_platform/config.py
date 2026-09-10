@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     github_worker_ref: str = "main"
     github_callback_token: str = ""
     public_base_url: str = ""
+    callback_signature_tolerance_seconds: int = 300
+    max_worker_attempts: int = 5
+    model_failover_attempts: int = 3
+    model_retry_attempts: int = 3
+    model_retry_base_delay_seconds: float = 1.0
+    model_retry_max_delay_seconds: float = 30.0
+    model_max_response_bytes: int = 2_000_000
+    model_max_tool_output_chars: int = 20_000
     model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
 
 
