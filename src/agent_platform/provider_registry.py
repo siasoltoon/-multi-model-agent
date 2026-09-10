@@ -48,39 +48,8 @@ class ProviderDefinition:
         }
 
 
-def _oc(
-    provider_id: str,
-    display_name: str,
-    base_url: str,
-    models_url: str | None,
-    api_key_env: str,
-    *,
-    category: Category = "direct",
-    billing_type: BillingType = "unknown",
-    free_status: FreeStatus = "unknown",
-    free_quota: str | None = None,
-    context: int = 32768,
-    roles: tuple[str, ...] = (),
-    tool_support: bool | None = None,
-    docs_url: str | None = None,
-    discovery_supported: bool = False,
-) -> ProviderDefinition:
-    return ProviderDefinition(
-        provider_id=provider_id,
-        display_name=display_name,
-        category=category,
-        base_url=base_url,
-        models_url=models_url,
-        api_key_env=api_key_env,
-        billing_type=billing_type,
-        free_status=free_status,
-        free_quota=free_quota,
-        discovery_supported=discovery_supported,
-        tool_support=tool_support,
-        default_context_window=context,
-        role_fit=roles,
-        docs_url=docs_url,
-    )
+def _oc(provider_id: str, display_name: str, base_url: str, models_url: str | None, api_key_env: str, *, category: Category = "direct", billing_type: BillingType = "unknown", free_status: FreeStatus = "unknown", free_quota: str | None = None, context: int = 32768, roles: tuple[str, ...] = (), tool_support: bool | None = None, docs_url: str | None = None, discovery_supported: bool = False) -> ProviderDefinition:
+    return ProviderDefinition(provider_id=provider_id, display_name=display_name, category=category, base_url=base_url, models_url=models_url, api_key_env=api_key_env, billing_type=billing_type, free_status=free_status, free_quota=free_quota, discovery_supported=discovery_supported, tool_support=tool_support, default_context_window=context, role_fit=roles, docs_url=docs_url)
 
 
 # Catalog first, API activation second. Only explicitly verified providers have
@@ -97,7 +66,6 @@ PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     _oc("featherless", "Featherless AI", "https://api.featherless.ai/v1", "https://api.featherless.ai/v1/models", "FEATHERLESS_API_KEY", free_status="candidate", roles=("coding", "testing")),
     _oc("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", "https://api.deepinfra.com/v1/openai/models", "DEEPINFRA_API_KEY", roles=("coding", "testing")),
     _oc("siliconflow", "SiliconFlow", "https://api.siliconflow.com/v1", "https://api.siliconflow.com/v1/models", "SILICONFLOW_API_KEY", free_status="candidate", roles=("coding", "testing")),
-
     # Direct OpenAI-compatible providers
     _oc("groq", "Groq", "https://api.groq.com/openai/v1", "https://api.groq.com/openai/v1/models", "GROQ_API_KEY", free_status="candidate", roles=("analysis", "coding", "testing"), discovery_supported=True),
     _oc("mistral", "Mistral AI", "https://api.mistral.ai/v1", "https://api.mistral.ai/v1/models", "MISTRAL_API_KEY", roles=("analysis", "coding", "review"), discovery_supported=True),
@@ -118,30 +86,27 @@ PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     _oc("zhipu", "Zhipu AI / GLM", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/models", "ZHIPU_API_KEY", roles=("analysis", "coding", "review")),
     _oc("alibaba", "Alibaba Cloud DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models", "DASHSCOPE_API_KEY", roles=("analysis", "coding")),
     _oc("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "https://integrate.api.nvidia.com/v1/models", "NVIDIA_API_KEY", free_status="candidate", roles=("coding", "analysis")),
-
-    # First-class/native providers; adapters are deliberately separate work.
-    ProviderDefinition("openai", "OpenAI", "direct", api_key_env="OPENAI_API_KEY", adapter="openai", roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification")),
-    ProviderDefinition("anthropic", "Anthropic", "direct", api_key_env="ANTHROPIC_API_KEY", adapter="anthropic", openai_compatible=False, roles=("analysis", "architecture", "coding", "review", "security")),
-    ProviderDefinition("gemini", "Google Gemini / AI Studio", "direct", api_key_env="GEMINI_API_KEY", adapter="gemini", openai_compatible=False, free_status="candidate", roles=("analysis", "architecture", "coding", "review", "verification")),
-    ProviderDefinition("deepseek", "DeepSeek", "direct", base_url="https://api.deepseek.com", models_url="https://api.deepseek.com/models", api_key_env="DEEPSEEK_API_KEY", adapter="deepseek", roles=("analysis", "coding", "review")),
-    ProviderDefinition("xai", "xAI", "direct", base_url="https://api.x.ai/v1", models_url="https://api.x.ai/v1/models", api_key_env="XAI_API_KEY", adapter="xai", roles=("analysis", "coding", "review")),
-    ProviderDefinition("perplexity", "Perplexity", "direct", base_url="https://api.perplexity.ai", models_url="https://api.perplexity.ai/models", api_key_env="PERPLEXITY_API_KEY", adapter="perplexity", roles=("analysis", "research", "verification")),
-    ProviderDefinition("cloudflare_workers_ai", "Cloudflare Workers AI", "gateway", api_key_env="CLOUDFLARE_API_TOKEN", adapter="cloudflare", openai_compatible=False, free_status="candidate", roles=("coding", "testing")),
-    ProviderDefinition("aws_bedrock", "Amazon Bedrock", "direct", api_key_env="AWS_ACCESS_KEY_ID", adapter="aws_bedrock", openai_compatible=False, roles=("analysis", "coding", "testing")),
-    ProviderDefinition("google_vertex", "Google Vertex AI", "direct", api_key_env="GOOGLE_APPLICATION_CREDENTIALS", adapter="vertex", openai_compatible=False, roles=("analysis", "coding", "review")),
-    ProviderDefinition("azure_foundry", "Microsoft Foundry / Azure AI", "direct", api_key_env="AZURE_OPENAI_API_KEY", adapter="azure", openai_compatible=False, roles=("analysis", "coding", "review")),
-    ProviderDefinition("ibm_watsonx", "IBM watsonx", "direct", api_key_env="WATSONX_API_KEY", adapter="watsonx", openai_compatible=False, roles=("analysis", "review")),
-    ProviderDefinition("oracle_genai", "Oracle Generative AI", "direct", api_key_env="OCI_CONFIG_FILE", adapter="oracle_genai", openai_compatible=False, roles=("analysis", "coding")),
-    ProviderDefinition("sap_ai_core", "SAP AI Core", "direct", api_key_env="SAP_AI_CORE_CLIENT_ID", adapter="sap_ai_core", openai_compatible=False, roles=("analysis", "coding")),
-    ProviderDefinition("databricks", "Databricks Model Serving", "direct", api_key_env="DATABRICKS_TOKEN", adapter="databricks", roles=("analysis", "coding")),
-    ProviderDefinition("snowflake", "Snowflake Cortex", "direct", api_key_env="SNOWFLAKE_ACCOUNT", adapter="snowflake", openai_compatible=False, roles=("analysis", "verification")),
-
+    # Native providers
+    ProviderDefinition("openai", "OpenAI", "direct", api_key_env="OPENAI_API_KEY", adapter="openai", role_fit=("analysis", "architecture", "coding", "testing", "review", "security", "verification")),
+    ProviderDefinition("anthropic", "Anthropic", "direct", api_key_env="ANTHROPIC_API_KEY", adapter="anthropic", openai_compatible=False, role_fit=("analysis", "architecture", "coding", "review", "security")),
+    ProviderDefinition("gemini", "Google Gemini / AI Studio", "direct", api_key_env="GEMINI_API_KEY", adapter="gemini", openai_compatible=False, free_status="candidate", role_fit=("analysis", "architecture", "coding", "review", "verification")),
+    ProviderDefinition("deepseek", "DeepSeek", "direct", base_url="https://api.deepseek.com", models_url="https://api.deepseek.com/models", api_key_env="DEEPSEEK_API_KEY", adapter="deepseek", role_fit=("analysis", "coding", "review")),
+    ProviderDefinition("xai", "xAI", "direct", base_url="https://api.x.ai/v1", models_url="https://api.x.ai/v1/models", api_key_env="XAI_API_KEY", adapter="xai", role_fit=("analysis", "coding", "review")),
+    ProviderDefinition("perplexity", "Perplexity", "direct", base_url="https://api.perplexity.ai", models_url="https://api.perplexity.ai/models", api_key_env="PERPLEXITY_API_KEY", adapter="perplexity", role_fit=("analysis", "research", "verification")),
+    ProviderDefinition("cloudflare_workers_ai", "Cloudflare Workers AI", "gateway", api_key_env="CLOUDFLARE_API_TOKEN", adapter="cloudflare", openai_compatible=False, free_status="candidate", role_fit=("coding", "testing")),
+    ProviderDefinition("aws_bedrock", "Amazon Bedrock", "direct", api_key_env="AWS_ACCESS_KEY_ID", adapter="aws_bedrock", openai_compatible=False, role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("google_vertex", "Google Vertex AI", "direct", api_key_env="GOOGLE_APPLICATION_CREDENTIALS", adapter="vertex", openai_compatible=False, role_fit=("analysis", "coding", "review")),
+    ProviderDefinition("azure_foundry", "Microsoft Foundry / Azure AI", "direct", api_key_env="AZURE_OPENAI_API_KEY", adapter="azure", openai_compatible=False, role_fit=("analysis", "coding", "review")),
+    ProviderDefinition("ibm_watsonx", "IBM watsonx", "direct", api_key_env="WATSONX_API_KEY", adapter="watsonx", openai_compatible=False, role_fit=("analysis", "review")),
+    ProviderDefinition("oracle_genai", "Oracle Generative AI", "direct", api_key_env="OCI_CONFIG_FILE", adapter="oracle_genai", openai_compatible=False, role_fit=("analysis", "coding")),
+    ProviderDefinition("sap_ai_core", "SAP AI Core", "direct", api_key_env="SAP_AI_CORE_CLIENT_ID", adapter="sap_ai_core", openai_compatible=False, role_fit=("analysis", "coding")),
+    ProviderDefinition("databricks", "Databricks Model Serving", "direct", api_key_env="DATABRICKS_TOKEN", adapter="databricks", role_fit=("analysis", "coding")),
+    ProviderDefinition("snowflake", "Snowflake Cortex", "direct", api_key_env="SNOWFLAKE_ACCOUNT", adapter="snowflake", openai_compatible=False, role_fit=("analysis", "verification")),
     # Hosted inference / compute
-    ProviderDefinition("replicate", "Replicate", "direct", base_url="https://api.replicate.com/v1", api_key_env="REPLICATE_API_TOKEN", adapter="replicate", openai_compatible=False, roles=("coding", "testing")),
-    ProviderDefinition("modal", "Modal", "direct", api_key_env="MODAL_TOKEN_ID", adapter="modal", openai_compatible=False, free_status="candidate", roles=("coding", "testing")),
-    ProviderDefinition("ai_horde", "AI Horde", "gateway", api_key_env="AI_HORDE_API_KEY", adapter="ai_horde", openai_compatible=False, free_status="candidate", roles=("analysis", "testing")),
-    ProviderDefinition("pollinations", "Pollinations AI", "gateway", api_key_env="POLLINATIONS_API_KEY", adapter="pollinations", openai_compatible=False, free_status="candidate", roles=("analysis", "testing")),
-
+    ProviderDefinition("replicate", "Replicate", "direct", base_url="https://api.replicate.com/v1", api_key_env="REPLICATE_API_TOKEN", adapter="replicate", openai_compatible=False, role_fit=("coding", "testing")),
+    ProviderDefinition("modal", "Modal", "direct", api_key_env="MODAL_TOKEN_ID", adapter="modal", openai_compatible=False, free_status="candidate", role_fit=("coding", "testing")),
+    ProviderDefinition("ai_horde", "AI Horde", "gateway", api_key_env="AI_HORDE_API_KEY", adapter="ai_horde", openai_compatible=False, free_status="candidate", role_fit=("analysis", "testing")),
+    ProviderDefinition("pollinations", "Pollinations AI", "gateway", api_key_env="POLLINATIONS_API_KEY", adapter="pollinations", openai_compatible=False, free_status="candidate", role_fit=("analysis", "testing")),
     # Local runtimes
     ProviderDefinition("ollama", "Ollama", "local", base_url="http://127.0.0.1:11434", models_url="http://127.0.0.1:11434/api/tags", adapter="ollama", openai_compatible=False, billing_type="local", free_status="verified", tool_support=True, role_fit=("analysis", "architecture", "coding", "testing", "review")),
     ProviderDefinition("vllm", "vLLM", "local", adapter="vllm", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
