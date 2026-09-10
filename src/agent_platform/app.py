@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from .config import settings
 from .discovery import ProviderDiscovery
 from .engine import AgentEngine
+from .github_dispatcher import GitHubActionsDispatcher
 from .models import HealthResponse, Task, TaskRequest, TaskStatus
 from .persistent_store import PersistentTaskStore
 from .router import ModelEndpoint, SmartRouter
@@ -29,12 +30,18 @@ leases = None
 if settings.database_url.startswith(("postgresql://", "postgres://")):
     from .persistent_leases import PersistentWorkerLeases
     leases = PersistentWorkerLeases(settings.database_url)
-app = FastAPI(title=settings.app_name, version="0.4.0")
+app = FastAPI(title=settings.app_name, version="0.5.0")
 
 
 def _authorized(token: str | None) -> None:
     if settings.worker_auth_token and token != settings.worker_auth_token:
         raise HTTPException(401, "invalid worker token")
+
+
+def _callback_authorized(token: str | None) -> None:
+    expected = settings.github_callback_token or settings.worker_auth_token
+    if expected and token != expected:
+        raise HTTPException(401, "invalid callback token")
 
 
 def _register(items):
@@ -66,7 +73,7 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def terminal():
-    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · resumable execution</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create task</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});o.textContent=JSON.stringify(await r.json(),null,2)}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
+    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · automatic worker resume</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create + Run</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});let t=await r.json();if(r.ok){await fetch('/api/tasks/'+t.id+'/dispatch',{method:'POST'});watch(t.id)}o.textContent=JSON.stringify(t,null,2)}async function watch(id){let es=new EventSource('/api/tasks/'+id+'/stream');es.onmessage=e=>o.textContent=JSON.stringify(JSON.parse(e.data),null,2);es.onerror=()=>es.close()}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
 
 
 @app.post("/api/providers/discover")
@@ -118,6 +125,33 @@ def plan_task(task_id: UUID):
     return {"task_id": str(task.id), "nodes": [{"id": n.id, "role": n.role, "dependencies": sorted(n.dependencies)} for n in plan.dag.nodes.values()]}
 
 
+def _dispatch(task: Task) -> dict:
+    repository = str(task.metadata.get("repository") or settings.github_worker_repository)
+    if not repository:
+        raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
+    dispatcher = GitHubActionsDispatcher(settings.github_token)
+    branch = str(task.metadata.get("worker_branch") or f"agent/task-{task.id}")
+    task.metadata["repository"] = repository
+    task.metadata["worker_branch"] = branch
+    task.metadata["worker_workflow"] = settings.github_worker_workflow
+    task.attempts += 1
+    task.status = TaskStatus.RUNNING
+    store.save(task)
+    if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
+    return dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
+        "task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps),
+        "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)),
+        "working_branch": branch, "callback_url": str(task.metadata.get("callback_url", "")),
+    })
+
+
+@app.post("/api/tasks/{task_id}/dispatch")
+def dispatch_task(task_id: UUID):
+    task = store.get(task_id)
+    if not task: raise HTTPException(404, "task not found")
+    return {"task_id": str(task.id), **_dispatch(task)}
+
+
 @app.post("/api/tasks/{task_id}/run")
 async def execute_task(task_id: UUID, workspace: str):
     task = store.get(task_id)
@@ -131,6 +165,29 @@ async def execute_task(task_id: UUID, workspace: str):
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, task.status.value, {"step": task.current_step, "repairs": task.repair_attempts})
     return task
+
+
+@app.post("/api/tasks/{task_id}/worker-callback")
+def worker_callback(task_id: UUID, payload: dict, authorization: str | None = Header(default=None)):
+    _callback_authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    task = store.get(task_id)
+    if not task: raise HTTPException(404, "task not found")
+    task.worker_id = payload.get("worker_id") or task.worker_id
+    task.worker_run_id = payload.get("run_id") or task.worker_run_id
+    task.current_step = int(payload.get("steps", task.current_step))
+    task.repair_attempts = int(payload.get("repairs", task.repair_attempts))
+    task.result = payload
+    status = str(payload.get("status", "failed"))
+    task.status = TaskStatus.COMPLETED if status == "completed" else TaskStatus.CHECKPOINTED if status == "checkpointed" else TaskStatus.FAILED
+    task.error = str(payload["error"]) if payload.get("error") else None
+    if status == "checkpointed":
+        task.checkpoint = {"messages": payload.get("messages", []), "steps": task.current_step, "repairs": task.repair_attempts}
+    store.save(task)
+    if hasattr(store, "event"): store.event(task.id, "worker_result", {"status": status, "step": task.current_step, "attempt": task.attempts})
+    max_attempts = int(task.metadata.get("max_worker_attempts", 5))
+    if status == "checkpointed" and task.attempts < max_attempts:
+        return {"accepted": True, "resume_scheduled": True, **_dispatch(task)}
+    return {"accepted": True, "resume_scheduled": False, "status": task.status.value}
 
 
 @app.get("/api/tasks/{task_id}/stream")
