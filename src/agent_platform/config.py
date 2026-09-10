@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = 300
     model_request_timeout_seconds: int = 180
     worker_auth_token: str = ""
+    github_token: str = ""
+    github_worker_repository: str = ""
+    github_worker_workflow: str = "agent-worker.yml"
+    github_worker_ref: str = "main"
+    github_callback_token: str = ""
     model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
 
 
