@@ -30,7 +30,7 @@ leases = None
 if settings.database_url.startswith(("postgresql://", "postgres://")):
     from .persistent_leases import PersistentWorkerLeases
     leases = PersistentWorkerLeases(settings.database_url)
-app = FastAPI(title=settings.app_name, version="0.5.0")
+app = FastAPI(title=settings.app_name, version="0.5.1")
 
 
 def _authorized(token: str | None) -> None:
@@ -77,7 +77,7 @@ def root():
         "name": settings.app_name,
         "interface": "terminal",
         "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.",
-        "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent run-local"],
+        "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent plan", "multi-model-agent events", "multi-model-agent resume", "multi-model-agent cancel", "multi-model-agent run-local"],
     })
 
 
@@ -142,6 +142,7 @@ def _dispatch(task: Task) -> dict:
     task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": settings.github_worker_workflow, "callback_url": callback_url})
     task.attempts += 1
     task.status = TaskStatus.RUNNING
+    task.error = None
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
     return dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
@@ -155,7 +156,31 @@ def _dispatch(task: Task) -> dict:
 def dispatch_task(task_id: UUID):
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
+    if task.status == TaskStatus.RUNNING:
+        raise HTTPException(409, "task is already running")
     return {"task_id": str(task.id), **_dispatch(task)}
+
+
+@app.post("/api/tasks/{task_id}/resume")
+def resume_task(task_id: UUID):
+    task = store.get(task_id)
+    if not task: raise HTTPException(404, "task not found")
+    if not task.checkpoint and task.status not in {TaskStatus.FAILED, TaskStatus.CHECKPOINTED}:
+        raise HTTPException(409, "task has no resumable checkpoint")
+    return {"task_id": str(task.id), "resumed": True, **_dispatch(task)}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: UUID):
+    task = store.get(task_id)
+    if not task: raise HTTPException(404, "task not found")
+    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
+        return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
+    task.status = TaskStatus.CANCELLED
+    task.error = "cancelled by user"
+    store.save(task)
+    if hasattr(store, "event"): store.event(task.id, "cancelled", {"by": "user"})
+    return {"task_id": str(task.id), "cancelled": True, "status": task.status.value}
 
 
 @app.post("/api/tasks/{task_id}/run")
@@ -178,6 +203,9 @@ def worker_callback(task_id: UUID, payload: dict, authorization: str | None = He
     _callback_authorized(authorization.removeprefix("Bearer ") if authorization else None)
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
+    if task.status == TaskStatus.CANCELLED:
+        if hasattr(store, "event"): store.event(task.id, "late_worker_result_ignored", {"run_id": payload.get("run_id")})
+        return {"accepted": True, "ignored": True, "status": task.status.value}
     task.worker_id = payload.get("worker_id") or task.worker_id
     task.worker_run_id = payload.get("run_id") or task.worker_run_id
     task.current_step = int(payload.get("steps", task.current_step))
