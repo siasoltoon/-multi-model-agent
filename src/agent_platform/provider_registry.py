@@ -83,9 +83,8 @@ def _oc(
     )
 
 
-# Comprehensive capability catalog. This file deliberately separates provider
-# identity/capabilities from API activation. Candidates remain discovery-disabled
-# until their current API contract is verified and an adapter is implemented.
+# Catalog first, API activation second. Only explicitly verified providers have
+# discovery_supported=True; catalog entries alone must never cause network calls.
 PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     # Gateways / aggregators
     _oc("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/models", "OPENROUTER_API_KEY", category="gateway", roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification"), discovery_supported=True),
@@ -99,7 +98,7 @@ PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     _oc("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", "https://api.deepinfra.com/v1/openai/models", "DEEPINFRA_API_KEY", roles=("coding", "testing")),
     _oc("siliconflow", "SiliconFlow", "https://api.siliconflow.com/v1", "https://api.siliconflow.com/v1/models", "SILICONFLOW_API_KEY", free_status="candidate", roles=("coding", "testing")),
 
-    # Major direct model providers
+    # Direct OpenAI-compatible providers
     _oc("groq", "Groq", "https://api.groq.com/openai/v1", "https://api.groq.com/openai/v1/models", "GROQ_API_KEY", free_status="candidate", roles=("analysis", "coding", "testing"), discovery_supported=True),
     _oc("mistral", "Mistral AI", "https://api.mistral.ai/v1", "https://api.mistral.ai/v1/models", "MISTRAL_API_KEY", roles=("analysis", "coding", "review"), discovery_supported=True),
     _oc("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "https://api.cerebras.ai/v1/models", "CEREBRAS_API_KEY", free_status="candidate", roles=("analysis", "coding"), discovery_supported=True),
@@ -120,13 +119,13 @@ PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     _oc("alibaba", "Alibaba Cloud DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models", "DASHSCOPE_API_KEY", roles=("analysis", "coding")),
     _oc("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "https://integrate.api.nvidia.com/v1/models", "NVIDIA_API_KEY", free_status="candidate", roles=("coding", "analysis")),
 
-    # First-class providers with native APIs; adapter work comes later.
-    ProviderDefinition("openai", "OpenAI", "direct", api_key_env="OPENAI_API_KEY", adapter="openai", openai_compatible=True, roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification")),
+    # First-class/native providers; adapters are deliberately separate work.
+    ProviderDefinition("openai", "OpenAI", "direct", api_key_env="OPENAI_API_KEY", adapter="openai", roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification")),
     ProviderDefinition("anthropic", "Anthropic", "direct", api_key_env="ANTHROPIC_API_KEY", adapter="anthropic", openai_compatible=False, roles=("analysis", "architecture", "coding", "review", "security")),
     ProviderDefinition("gemini", "Google Gemini / AI Studio", "direct", api_key_env="GEMINI_API_KEY", adapter="gemini", openai_compatible=False, free_status="candidate", roles=("analysis", "architecture", "coding", "review", "verification")),
-    ProviderDefinition("deepseek", "DeepSeek", "direct", base_url="https://api.deepseek.com", models_url="https://api.deepseek.com/models", api_key_env="DEEPSEEK_API_KEY", adapter="deepseek", openai_compatible=True, roles=("analysis", "coding", "review")),
-    ProviderDefinition("xai", "xAI", "direct", base_url="https://api.x.ai/v1", models_url="https://api.x.ai/v1/models", api_key_env="XAI_API_KEY", adapter="xai", openai_compatible=True, roles=("analysis", "coding", "review")),
-    ProviderDefinition("perplexity", "Perplexity", "direct", base_url="https://api.perplexity.ai", models_url="https://api.perplexity.ai/models", api_key_env="PERPLEXITY_API_KEY", adapter="perplexity", openai_compatible=True, roles=("analysis", "research", "verification")),
+    ProviderDefinition("deepseek", "DeepSeek", "direct", base_url="https://api.deepseek.com", models_url="https://api.deepseek.com/models", api_key_env="DEEPSEEK_API_KEY", adapter="deepseek", roles=("analysis", "coding", "review")),
+    ProviderDefinition("xai", "xAI", "direct", base_url="https://api.x.ai/v1", models_url="https://api.x.ai/v1/models", api_key_env="XAI_API_KEY", adapter="xai", roles=("analysis", "coding", "review")),
+    ProviderDefinition("perplexity", "Perplexity", "direct", base_url="https://api.perplexity.ai", models_url="https://api.perplexity.ai/models", api_key_env="PERPLEXITY_API_KEY", adapter="perplexity", roles=("analysis", "research", "verification")),
     ProviderDefinition("cloudflare_workers_ai", "Cloudflare Workers AI", "gateway", api_key_env="CLOUDFLARE_API_TOKEN", adapter="cloudflare", openai_compatible=False, free_status="candidate", roles=("coding", "testing")),
     ProviderDefinition("aws_bedrock", "Amazon Bedrock", "direct", api_key_env="AWS_ACCESS_KEY_ID", adapter="aws_bedrock", openai_compatible=False, roles=("analysis", "coding", "testing")),
     ProviderDefinition("google_vertex", "Google Vertex AI", "direct", api_key_env="GOOGLE_APPLICATION_CREDENTIALS", adapter="vertex", openai_compatible=False, roles=("analysis", "coding", "review")),
@@ -134,33 +133,33 @@ PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     ProviderDefinition("ibm_watsonx", "IBM watsonx", "direct", api_key_env="WATSONX_API_KEY", adapter="watsonx", openai_compatible=False, roles=("analysis", "review")),
     ProviderDefinition("oracle_genai", "Oracle Generative AI", "direct", api_key_env="OCI_CONFIG_FILE", adapter="oracle_genai", openai_compatible=False, roles=("analysis", "coding")),
     ProviderDefinition("sap_ai_core", "SAP AI Core", "direct", api_key_env="SAP_AI_CORE_CLIENT_ID", adapter="sap_ai_core", openai_compatible=False, roles=("analysis", "coding")),
-    ProviderDefinition("databricks", "Databricks Model Serving", "direct", api_key_env="DATABRICKS_TOKEN", adapter="databricks", openai_compatible=True, roles=("analysis", "coding")),
+    ProviderDefinition("databricks", "Databricks Model Serving", "direct", api_key_env="DATABRICKS_TOKEN", adapter="databricks", roles=("analysis", "coding")),
     ProviderDefinition("snowflake", "Snowflake Cortex", "direct", api_key_env="SNOWFLAKE_ACCOUNT", adapter="snowflake", openai_compatible=False, roles=("analysis", "verification")),
 
-    # Other hosted inference / compute platforms.
+    # Hosted inference / compute
     ProviderDefinition("replicate", "Replicate", "direct", base_url="https://api.replicate.com/v1", api_key_env="REPLICATE_API_TOKEN", adapter="replicate", openai_compatible=False, roles=("coding", "testing")),
     ProviderDefinition("modal", "Modal", "direct", api_key_env="MODAL_TOKEN_ID", adapter="modal", openai_compatible=False, free_status="candidate", roles=("coding", "testing")),
     ProviderDefinition("ai_horde", "AI Horde", "gateway", api_key_env="AI_HORDE_API_KEY", adapter="ai_horde", openai_compatible=False, free_status="candidate", roles=("analysis", "testing")),
     ProviderDefinition("pollinations", "Pollinations AI", "gateway", api_key_env="POLLINATIONS_API_KEY", adapter="pollinations", openai_compatible=False, free_status="candidate", roles=("analysis", "testing")),
 
-    # Local runtimes / servers.
-    ProviderDefinition("ollama", "Ollama", "local", base_url="http://127.0.0.1:11434", models_url="http://127.0.0.1:11434/api/tags", adapter="ollama", openai_compatible=False, billing_type="local", free_status="verified", discovery_supported=False, tool_support=True, role_fit=("analysis", "architecture", "coding", "testing", "review")),
-    ProviderDefinition("vllm", "vLLM", "local", adapter="vllm", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
-    ProviderDefinition("localai", "LocalAI", "local", adapter="localai", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
-    ProviderDefinition("lmstudio", "LM Studio", "local", adapter="lmstudio", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
-    ProviderDefinition("llamacpp", "llama.cpp server", "local", adapter="llamacpp", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("coding", "testing")),
-    ProviderDefinition("sglang", "SGLang", "local", adapter="sglang", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("coding", "testing")),
-    ProviderDefinition("tgi", "Hugging Face Text Generation Inference", "local", adapter="tgi", openai_compatible=False, billing_type="local", free_status="verified", role_fit=("coding", "testing")),
-    ProviderDefinition("jan", "Jan", "local", adapter="jan", openai_compatible=True, billing_type="local", free_status="verified", role_fit=("analysis", "coding")),
-    ProviderDefinition("gpt4all", "GPT4All", "local", adapter="gpt4all", openai_compatible=False, billing_type="local", free_status="verified", role_fit=("analysis", "coding")),
-    ProviderDefinition("koboldcpp", "KoboldCpp", "local", adapter="koboldcpp", openai_compatible=False, billing_type="local", free_status="verified", role_fit=("coding", "testing")),
+    # Local runtimes
+    ProviderDefinition("ollama", "Ollama", "local", base_url="http://127.0.0.1:11434", models_url="http://127.0.0.1:11434/api/tags", adapter="ollama", openai_compatible=False, billing_type="local", free_status="verified", tool_support=True, role_fit=("analysis", "architecture", "coding", "testing", "review")),
+    ProviderDefinition("vllm", "vLLM", "local", adapter="vllm", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("localai", "LocalAI", "local", adapter="localai", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("lmstudio", "LM Studio", "local", adapter="lmstudio", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("llamacpp", "llama.cpp server", "local", adapter="llamacpp", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("sglang", "SGLang", "local", adapter="sglang", billing_type="local", free_status="verified", role_fit=("analysis", "coding", "testing")),
+    ProviderDefinition("tgi", "Text Generation Inference", "local", adapter="tgi", billing_type="local", free_status="verified", role_fit=("coding", "testing")),
+    ProviderDefinition("jan", "Jan", "local", adapter="jan", billing_type="local", free_status="verified", role_fit=("analysis", "coding")),
+    ProviderDefinition("gpt4all", "GPT4All", "local", adapter="gpt4all", billing_type="local", free_status="verified", role_fit=("analysis", "coding")),
+    ProviderDefinition("koboldcpp", "KoboldCpp", "local", adapter="koboldcpp", billing_type="local", free_status="verified", role_fit=("analysis", "coding")),
 )
 
-PROVIDERS_BY_ID = {item.provider_id: item for item in PROVIDER_REGISTRY}
+PROVIDERS_BY_ID: dict[str, ProviderDefinition] = {item.provider_id: item for item in PROVIDER_REGISTRY}
 
 
 def get_provider(provider_id: str) -> ProviderDefinition:
     try:
         return PROVIDERS_BY_ID[provider_id]
     except KeyError as exc:
-        raise KeyError(f"unknown provider: {provider_id}") from exc
+        raise KeyError(f"Unknown provider: {provider_id}") from exc
