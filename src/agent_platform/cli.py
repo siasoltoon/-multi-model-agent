@@ -14,6 +14,7 @@ from .discovery import ProviderDiscovery
 from .models import Task
 from .router import ModelEndpoint, SmartRouter
 from .runner import run_task
+from .worker_runtime import run_worker
 
 
 def _headers() -> dict[str, str]:
@@ -132,11 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="multi-model-agent", description="Terminal-first multi-model coding agent")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("submit", help="create a task and dispatch a GitHub Actions worker")
+    p = sub.add_parser("submit", help="create a task and route it to laptop first, then GitHub Actions")
     p.add_argument("prompt")
     p.add_argument("--steps", type=int, choices=(32, 64), default=None)
     p.add_argument("--repository")
     p.add_argument("--base-branch", default="main")
+
+    p = sub.add_parser("worker", help="run this machine as a laptop/PC worker")
+    p.add_argument("--workspace", default=None)
 
     p = sub.add_parser("status", help="show task state")
     p.add_argument("task_id")
@@ -168,6 +172,10 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.command == "submit":
         return submit(args.prompt, args.steps, args.repository, args.base_branch)
+    if args.command == "worker":
+        if args.workspace:
+            os.environ["AGENT_WORKSPACE"] = args.workspace
+        return asyncio.run(run_worker())
     if args.command == "status":
         return status(args.task_id)
     if args.command == "watch":
