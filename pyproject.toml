@@ -1,7 +1,7 @@
 [project]
 name = "multi-model-agent"
-version = "0.4.0"
-description = "Resumable multi-model coding-agent control plane with durable storage, leases, routing, and workers"
+version = "0.5.0"
+description = "Resumable multi-model coding-agent control plane with durable storage, leases, routing, workers, and terminal-first CLI"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -11,6 +11,9 @@ dependencies = [
   "httpx>=0.28,<1",
   "PyYAML>=6,<7",
 ]
+
+[project.scripts]
+multi-model-agent = "agent_platform.cli:main"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
