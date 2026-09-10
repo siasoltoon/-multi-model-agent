@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agent_platform.adapters import ModelResponse
@@ -16,12 +18,13 @@ class FakeAdapter:
         return ModelResponse("done", {}, {}, [])
 
 
-@pytest.mark.asyncio
-async def test_agent_loop_executes_tools(tmp_path):
-    tools = WorkspaceTools(str(tmp_path))
-    result = await AgentLoop(FakeAdapter(), tools.as_tools(), AgentPolicy(max_steps=4)).run(
-        [{"role": "user", "content": "create x.txt"}], tools.specs()
-    )
+def test_agent_loop_executes_tools(tmp_path):
+    async def run():
+        tools = WorkspaceTools(str(tmp_path))
+        return await AgentLoop(FakeAdapter(), tools.as_tools(), AgentPolicy(max_steps=4)).run(
+            [{"role": "user", "content": "create x.txt"}], tools.specs()
+        )
+    result = asyncio.run(run())
     assert result["status"] == "completed"
     assert (tmp_path / "x.txt").read_text() == "ok"
 
