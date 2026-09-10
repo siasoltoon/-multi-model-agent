@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     worker_heartbeat_seconds: int = 15
     worker_lease_seconds: int = 300
     worker_poll_seconds: int = 5
+    laptop_worker_enabled: bool = True
     model_request_timeout_seconds: int = 180
     worker_auth_token: str = ""
     github_token: str = ""
