@@ -13,12 +13,18 @@ on:
         default: '64'
         type: string
       repository:
-        description: Repository to work on, e.g. owner/name
+        description: Target repository, e.g. owner/name
         required: true
+        type: string
+      base_branch:
+        description: Branch to base the agent change on
+        required: false
+        default: main
         type: string
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   worker:
@@ -29,8 +35,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
+          ref: ${{ inputs.base_branch }}
           token: ${{ secrets.AGENT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           path: workspace
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -45,13 +53,22 @@ jobs:
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
           AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
         run: python -m agent_platform.worker_entry
-      - name: Commit verified changes
+      - name: Commit and open PR
         working-directory: workspace
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
           git config user.name 'multi-model-agent[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
-            git commit -m 'agent: apply verified task changes'
-            git push origin HEAD:main
+          if [ -z "$(git status --porcelain)" ]; then
+            echo 'No verified changes produced.'
+            exit 0
           fi
+          BRANCH="agent/task-${GITHUB_RUN_ID}"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m 'agent: apply verified task changes'
+          git push --set-upstream origin "$BRANCH"
+          gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" --title 'agent: verified task changes' --body "Automated coding-agent run ${GITHUB_RUN_ID}. Changes were produced only after the worker-side verification loop completed."
