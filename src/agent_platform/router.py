@@ -25,7 +25,7 @@ class ModelEndpoint:
 
 
 class SmartRouter:
-    """Adaptive model router with capability filtering, free-first scoring and cooldowns."""
+    """Adaptive model router with capability filtering, role-aware scoring and failover."""
 
     def __init__(self, endpoints: list[ModelEndpoint] | None = None):
         self.endpoints = endpoints or []
@@ -35,11 +35,11 @@ class SmartRouter:
         self.endpoints.append(endpoint)
 
     @staticmethod
-    def _task_multiplier(endpoint: ModelEndpoint, task_type: str) -> float | None:
-        capabilities = endpoint.metadata.get("task_fit", {}) if isinstance(endpoint.metadata, dict) else {}
-        if isinstance(capabilities, dict) and task_type in capabilities:
+    def _fit_multiplier(endpoint: ModelEndpoint, key: str, value: str) -> float | None:
+        capabilities = endpoint.metadata.get(key, {}) if isinstance(endpoint.metadata, dict) else {}
+        if isinstance(capabilities, dict) and value in capabilities:
             try:
-                return max(0.05, min(1.0, float(capabilities[task_type])))
+                return max(0.05, min(1.0, float(capabilities[value])))
             except (TypeError, ValueError):
                 pass
         return None
@@ -78,19 +78,22 @@ class SmartRouter:
         min_context: int = 0,
         tools: bool = False,
         task_type: str = "coding",
+        role: str | None = None,
     ) -> list[ModelEndpoint]:
         candidates = self._candidates(min_context=min_context, tools=tools)
 
         def score(e: ModelEndpoint) -> float:
-            explicit_fit = self._task_multiplier(e, task_type)
-            effective_fit = e.task_fit if explicit_fit is None else explicit_fit
-            fit = max(0.05, min(1.0, effective_fit * task_fit))
+            explicit_task = self._fit_multiplier(e, "task_fit", task_type)
+            effective_task = e.task_fit if explicit_task is None else explicit_task
+            role_fit = self._fit_multiplier(e, "role_fit", role) if role else None
+            effective_role = 1.0 if role_fit is None else role_fit
+            fit = max(0.05, min(1.0, effective_task * task_fit))
             reliability = max(0.05, min(1.0, e.reliability))
             quota = max(0.05, min(1.0, e.quota_remaining))
             speed = self._latency_score(e.latency_ms)
             billing = str(e.metadata.get("billing_type", "unknown")).lower() if isinstance(e.metadata, dict) else "unknown"
             free_bonus = 1.18 if billing in {"free", "local"} else 1.0
-            return free_bonus * (fit ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
+            return free_bonus * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
 
         return sorted(candidates, key=score, reverse=True)
 
