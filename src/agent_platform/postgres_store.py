@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import json
 from uuid import UUID
-
 from .models import Task
 
 
 class PostgresTaskStore:
     """Production PostgreSQL repository. Install the optional postgres extra to use it."""
-
     def __init__(self, dsn: str):
         try:
             import psycopg
@@ -45,6 +44,11 @@ class PostgresTaskStore:
         return self.save(task)
 
     def event(self, task_id: UUID, event: str, payload: dict) -> None:
-        import json
         with self.db.cursor() as cur:
             cur.execute("INSERT INTO task_events(task_id,event,payload) VALUES(%s,%s,%s::jsonb)", (str(task_id), event, json.dumps(payload, default=str)))
+
+    def events(self, task_id: UUID, limit: int = 200) -> list[dict]:
+        with self.db.cursor() as cur:
+            cur.execute("SELECT event,payload::text,created_at FROM task_events WHERE task_id=%s ORDER BY id DESC LIMIT %s", (str(task_id), limit))
+            rows = cur.fetchall()
+        return [{"event": e, "payload": json.loads(p), "created_at": str(ts)} for e, p, ts in rows]
