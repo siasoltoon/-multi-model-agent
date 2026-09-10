@@ -33,6 +33,11 @@ on:
         description: Control-plane callback URL
         required: true
         type: string
+      checkpoint_json:
+        description: Redacted resumable checkpoint JSON
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -72,6 +77,7 @@ jobs:
           AGENT_TASK_PROMPT: ${{ inputs.task_prompt }}
           AGENT_TASK_ID: ${{ inputs.task_id }}
           AGENT_MAX_STEPS: ${{ inputs.max_steps }}
+          AGENT_CHECKPOINT_JSON: ${{ inputs.checkpoint_json }}
           AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
