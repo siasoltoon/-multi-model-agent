@@ -12,6 +12,7 @@ from .provider_api_catalog import get_api_contract
 from .provider_connections import build_provider_adapter
 from .provider_registry import get_provider
 from .router import SmartRouter
+from .reliability import redact_secrets
 from .workspace_tools import WorkspaceTools
 
 ROLE_ORDER = ("analysis", "architecture", "coding", "testing", "review", "security", "repair", "verification")
@@ -36,7 +37,6 @@ def _api_key(endpoint) -> str:
 
 def _build_adapter(endpoint, timeout: float):
     definition = get_provider(endpoint.provider)
-    # Native providers have dedicated request/response translation.
     if definition.adapter in {"openai", "anthropic", "gemini"}:
         return build_provider_adapter(endpoint.provider, model=endpoint.model, timeout=timeout, api_key=_api_key(endpoint))
     if get_api_contract(endpoint.provider) is not None:
@@ -62,14 +62,23 @@ def _summary(result: dict[str, Any]) -> str:
     return str(result.get("error") or result.get("status") or "")[-10000:]
 
 
+def _checkpoint_phases(task: Task) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+    checkpoint = task.checkpoint or {}
+    raw = checkpoint.get("phases", []) if isinstance(checkpoint, dict) else []
+    phases = [dict(item) for item in raw if isinstance(item, dict) and item.get("role") in ROLE_ORDER]
+    active_role = checkpoint.get("active_role") if isinstance(checkpoint, dict) else None
+    messages = checkpoint.get("messages", []) if isinstance(checkpoint, dict) else []
+    return phases, active_role if active_role in ROLE_ORDER else None, messages if isinstance(messages, list) else []
+
+
 class PhaseRunner:
-    """Execute the complete role pipeline with independent routing and failover per phase."""
+    """Execute the role pipeline with provider failover and resumable role checkpoints."""
 
     def __init__(self, router: SmartRouter, workspace: str, *, on_phase: Callable[[dict[str, Any]], None] | None = None):
         self.router = router
         self.workspace = workspace
         self.on_phase = on_phase
-        self.request_timeout = float(os.getenv("AGENT_MODEL_REQUEST_TIMEOUT", "180"))
+        self.request_timeout = float(os.getenv("AGENT_MODEL_REQUEST_TIMEOUT_SECONDS", os.getenv("AGENT_MODEL_REQUEST_TIMEOUT", "180")))
         self.command_timeout = float(os.getenv("AGENT_COMMAND_TIMEOUT", "300"))
         self.task_timeout = float(os.getenv("AGENT_TIMEOUT_SECONDS", "1800"))
         self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "3")))
@@ -77,6 +86,8 @@ class PhaseRunner:
     def _adapter(self, role: str):
         ranked = self.router.ranked(min_context=4096, tools=ROLE_TOOLING[role], task_type=ROLE_TASK_TYPES[role], role=role)
         selected = ranked[: self.max_failover]
+        if not selected:
+            raise RuntimeError(f"no model endpoint available for role: {role}")
         adapter = FailoverAdapter([(e.id, _build_adapter(e, self.request_timeout)) for e in selected], on_failure=lambda endpoint_id, error: self.router.mark_failure(endpoint_id, error))
         return adapter, selected
 
@@ -87,18 +98,26 @@ class PhaseRunner:
     async def run(self, task: Task) -> dict[str, Any]:
         started = monotonic()
         tools = WorkspaceTools(self.workspace, command_timeout=self.command_timeout)
-        phases: list[dict[str, Any]] = []
-        prior: list[dict[str, Any]] = []
-        total_steps = 0
-        total_repairs = 0
+        phases, active_role, checkpoint_messages = _checkpoint_phases(task)
+        completed_roles = {p["role"] for p in phases if p.get("status") == "completed"}
+        prior = list(phases)
+        total_steps = int(task.current_step or sum(int(p.get("steps", 0) or 0) for p in phases))
+        total_repairs = int(task.repair_attempts or sum(int(p.get("repairs", 0) or 0) for p in phases))
+        resume_messages = checkpoint_messages if active_role else []
+
         for role in ROLE_ORDER:
+            if role in completed_roles and role != active_role:
+                continue
             if monotonic() - started >= self.task_timeout:
-                return {"status": "failed", "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
+                return {"status": "checkpointed", "active_role": role, "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
             adapter, selected = self._adapter(role)
-            messages = [
-                {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + " Never claim completion without evidence."},
-                {"role": "user", "content": _phase_context(task, role, prior)},
-            ]
+            if role == active_role and resume_messages:
+                messages = resume_messages
+            else:
+                messages = [
+                    {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + " Never claim completion without evidence."},
+                    {"role": "user", "content": _phase_context(task, role, prior)},
+                ]
             loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=self._budget(role, task.max_steps), repair_attempts=6, timeout_seconds=self.task_timeout))
             phase_started = monotonic()
             result = await loop.run(messages, tools.specs())
@@ -108,13 +127,26 @@ class PhaseRunner:
                 self.router.mark_success(active.id, latency_ms=elapsed_ms)
             else:
                 self.router.mark_failure(active.id, result.get("error", f"{role} phase failed"))
-            record = {"role": role, "status": result.get("status"), "model": active.model, "provider": active.provider, "steps": result.get("steps", 0), "repairs": result.get("repairs", 0), "latency_ms": round(elapsed_ms, 2), "summary": _summary(result)}
+            record = {
+                "role": role, "status": result.get("status"), "model": active.model, "provider": active.provider,
+                "steps": result.get("steps", 0), "repairs": result.get("repairs", 0), "latency_ms": round(elapsed_ms, 2),
+                "summary": _summary(result),
+            }
+            phases = [p for p in phases if p.get("role") != role]
             phases.append(record)
-            prior.append(record)
+            prior = list(phases)
             total_steps += int(result.get("steps", 0) or 0)
             total_repairs += int(result.get("repairs", 0) or 0)
             if self.on_phase:
                 self.on_phase(record)
+            if result.get("status") == "checkpointed":
+                return {
+                    "status": "checkpointed", "active_role": role, "phases": phases, "steps": total_steps, "repairs": total_repairs,
+                    "messages": redact_secrets(result.get("messages", [])),
+                }
             if result.get("status") != "completed":
                 return {"status": "failed", "error": f"{role} phase failed: {result.get('error', 'unknown error')}", "failed_phase": role, "phases": phases, "steps": total_steps, "repairs": total_repairs}
+            completed_roles.add(role)
+            active_role = None
+            resume_messages = []
         return {"status": "completed", "phases": phases, "steps": total_steps, "repairs": total_repairs, "models_used": [f"{p['provider']}/{p['model']}" for p in phases], "roles_completed": [p["role"] for p in phases]}
