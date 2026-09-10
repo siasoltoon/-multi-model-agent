@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.responses import HTMLResponse, StreamingResponse
 from .config import settings
 from .discovery import ProviderDiscovery
 from .engine import AgentEngine
@@ -13,12 +13,24 @@ from .router import ModelEndpoint, SmartRouter
 from .runner import run_task
 from .workers import Worker, WorkerRegistry, WorkerStatus
 
-store = PersistentTaskStore(settings.database_url)
+
+def _store():
+    if settings.database_url.startswith(("postgresql://", "postgres://")):
+        from .postgres_store import PostgresTaskStore
+        return PostgresTaskStore(settings.database_url)
+    return PersistentTaskStore(settings.database_url)
+
+store = _store()
 workers = WorkerRegistry()
 router = SmartRouter()
 engine = AgentEngine(router)
 discovery = ProviderDiscovery()
-app = FastAPI(title=settings.app_name, version="0.3.0")
+app = FastAPI(title=settings.app_name, version="0.4.0")
+
+
+def _authorized(token: str | None) -> None:
+    if settings.worker_auth_token and token != settings.worker_auth_token:
+        raise HTTPException(401, "invalid worker token")
 
 
 def _register(items):
@@ -27,7 +39,8 @@ def _register(items):
             id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
             model=item.model, base_url=item.base_url, context_window=item.context_window,
             tool_support=item.tool_support, task_fit=item.task_fit, reliability=item.reliability,
-            latency_ms=item.latency_ms, quota_remaining=1.0,
+            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env,
+            metadata=item.metadata,
         ))
 
 
@@ -38,12 +51,19 @@ async def startup_discovery():
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse()
+    redis_ok = None
+    if settings.redis_url:
+        try:
+            from .queue import RedisTaskQueue
+            redis_ok = RedisTaskQueue(settings.redis_url).ping()
+        except Exception:
+            redis_ok = False
+    return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if settings.database_url.startswith(("postgresql://", "postgres://")) else "sqlite", "redis": redis_ok}
 
 
 @app.get("/", response_class=HTMLResponse)
 def terminal():
-    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · automatic provider/model discovery · resumable agent loop</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create task</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});o.textContent=JSON.stringify(await r.json(),null,2)}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
+    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · resumable execution</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create task</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});o.textContent=JSON.stringify(await r.json(),null,2)}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
 
 
 @app.post("/api/providers/discover")
@@ -61,7 +81,16 @@ def providers():
 @app.post("/api/tasks", response_model=Task)
 def create_task(request: TaskRequest):
     task = Task(prompt=request.prompt, max_steps=request.max_steps or settings.max_agent_steps, metadata=request.metadata)
-    return store.save(task)
+    store.save(task)
+    if hasattr(store, "event"):
+        store.event(task.id, "created", {"max_steps": task.max_steps})
+    if settings.redis_url:
+        try:
+            from .queue import RedisTaskQueue
+            RedisTaskQueue(settings.redis_url).enqueue(str(task.id))
+        except Exception:
+            pass
+    return task
 
 
 @app.get("/api/tasks", response_model=list[Task])
@@ -75,6 +104,13 @@ def get_task(task_id: UUID):
     if not task:
         raise HTTPException(404, "task not found")
     return task
+
+
+@app.get("/api/tasks/{task_id}/events")
+def task_events(task_id: UUID):
+    if not hasattr(store, "events"):
+        raise HTTPException(501, "event listing unavailable on this backend")
+    return store.events(task_id)
 
 
 @app.post("/api/tasks/{task_id}/plan")
@@ -106,7 +142,28 @@ async def execute_task(task_id: UUID, workspace: str):
     if result.get("error"):
         task.error = str(result["error"])
     store.save(task)
+    if hasattr(store, "event"):
+        store.event(task.id, task.status.value, {"step": task.current_step, "repairs": task.repair_attempts})
     return task
+
+
+@app.get("/api/tasks/{task_id}/stream")
+async def stream_task(task_id: UUID):
+    async def events():
+        last = ""
+        for _ in range(3600):
+            task = store.get(task_id)
+            if not task:
+                yield "event: error\ndata: task not found\n\n"
+                return
+            state = task.model_dump_json()
+            if state != last:
+                yield f"event: task\ndata: {state}\n\n"
+                last = state
+            if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                return
+            await asyncio.sleep(1)
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
 
 @app.post("/api/tasks/{task_id}/checkpoint")
@@ -118,12 +175,14 @@ def checkpoint_task(task_id: UUID, step: int = 0):
 
 
 @app.post("/api/workers/register")
-def register_worker(worker: Worker):
+def register_worker(worker: Worker, authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
     return workers.register(worker)
 
 
 @app.post("/api/workers/{worker_id}/heartbeat")
-def heartbeat(worker_id: str, status: WorkerStatus | None = None):
+def heartbeat(worker_id: str, status: WorkerStatus | None = None, authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
     try:
         return workers.heartbeat(worker_id, status)
     except KeyError:
