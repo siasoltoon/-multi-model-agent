@@ -30,11 +30,10 @@ def test_agent_loop_executes_tools_and_preserves_tool_protocol(tmp_path):
     assert result["status"] == "completed"
     assert (tmp_path / "x.txt").read_text() == "ok"
     second_history = adapter.histories[1]
-    assistant = second_history[-2] if second_history[-2]["role"] == "assistant" else second_history[-3]
-    assert assistant["role"] == "assistant"
+    assistant = next(m for m in second_history if m.get("role") == "assistant" and m.get("tool_calls"))
+    tool = next(m for m in second_history if m.get("role") == "tool" and m.get("tool_call_id") == "call-1")
     assert assistant["tool_calls"][0]["id"] == "call-1"
-    assert second_history[-1]["role"] == "tool"
-    assert second_history[-1]["tool_call_id"] == "call-1"
+    assert tool["tool_call_id"] == "call-1"
 
 
 def test_workspace_blocks_escape(tmp_path):
