@@ -6,10 +6,12 @@ from typing import Any
 
 import httpx
 
+from .provider_registry import PROVIDER_REGISTRY, ProviderDefinition
+
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """Built-in provider metadata for automatic model discovery."""
+    """Backwards-compatible provider discovery specification."""
 
     name: str
     models_url: str
@@ -18,16 +20,18 @@ class ProviderSpec:
     auth_scheme: str = "bearer"
 
 
-# Providers using an OpenAI-compatible model catalog. A provider is only probed
-# when its credential is present, so adding this registry never creates traffic
-# or requires credentials for providers the operator did not enable.
-BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = (
-    ProviderSpec("openrouter", "https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    ProviderSpec("groq", "https://api.groq.com/openai/v1/models", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
-    ProviderSpec("cerebras", "https://api.cerebras.ai/v1/models", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
-    ProviderSpec("together", "https://api.together.xyz/v1/models", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
-    ProviderSpec("fireworks", "https://api.fireworks.ai/inference/v1/models", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
-    ProviderSpec("mistral", "https://api.mistral.ai/v1/models", "https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
+# Only providers with a concrete model catalog and OpenAI-compatible discovery
+# are activated here. The registry can contain candidates without causing traffic.
+BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
+    ProviderSpec(
+        item.provider_id,
+        item.models_url or "",
+        item.base_url or "",
+        item.api_key_env or "",
+        item.auth_scheme,
+    )
+    for item in PROVIDER_REGISTRY
+    if item.discovery_supported and item.models_url and item.base_url and item.api_key_env
 )
 
 
@@ -48,12 +52,7 @@ class DiscoveredEndpoint:
 
 
 class ProviderDiscovery:
-    """Automatically discover configured provider catalogs and local Ollama models.
-
-    Credentials are never scraped or stored here. Built-in providers are enabled
-    only when their API-key environment variable exists; additional providers can
-    be supplied through AGENT_PROVIDER_CATALOGS as JSON catalog URLs.
-    """
+    """Discover configured providers from the central registry plus local Ollama."""
 
     def __init__(
         self,
@@ -98,27 +97,30 @@ class ProviderDiscovery:
             data = response.json()
 
         items = data.get("data", []) if isinstance(data, dict) else data
+        registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
             model = str(item["id"])
-            context = int(item.get("context_length") or item.get("context_window") or 32768)
+            context = int(item.get("context_length") or item.get("context_window") or (registry.default_context_window if registry else 32768))
             supported = item.get("supported_parameters") or []
+            tool_support = ("tools" in supported or "tool_choice" in supported or not supported)
             metadata = {
                 "catalog": "openai-compatible",
                 "owned_by": item.get("owned_by"),
                 "created": item.get("created"),
                 "supported_parameters": supported,
                 "pricing": item.get("pricing"),
+                "registry": registry.to_metadata() if registry else {},
             }
             result.append(DiscoveredEndpoint(
                 provider=spec.name,
                 model=model,
                 base_url=spec.base_url,
                 context_window=context,
-                tool_support=("tools" in supported or "tool_choice" in supported or not supported),
-                billing_type="free" if _is_free_pricing(item.get("pricing")) else "paid_or_unknown",
+                tool_support=tool_support,
+                billing_type=(registry.billing_type if registry else ("free" if _is_free_pricing(item.get("pricing")) else "paid_or_unknown")),
                 api_key_env=spec.api_key_env,
                 source=spec.models_url,
                 metadata=metadata,
@@ -143,18 +145,11 @@ class ProviderDiscovery:
                 if not model:
                     continue
                 result.append(DiscoveredEndpoint(
-                    provider=str(item.get("provider", "unknown")),
-                    model=str(model),
-                    base_url=str(base),
-                    context_window=int(item.get("context_window", 32768)),
-                    tool_support=bool(item.get("tool_support", True)),
-                    task_fit=float(item.get("task_fit", 0.8)),
-                    reliability=float(item.get("reliability", 0.8)),
-                    latency_ms=float(item.get("latency_ms", 1000)),
-                    billing_type=str(item.get("billing_type", "unknown")),
-                    api_key_env=item.get("api_key_env"),
-                    source=url,
-                    metadata=item.get("metadata", {}),
+                    provider=str(item.get("provider", "unknown")), model=str(model), base_url=str(base),
+                    context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)),
+                    task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)),
+                    latency_ms=float(item.get("latency_ms", 1000)), billing_type=str(item.get("billing_type", "unknown")),
+                    api_key_env=item.get("api_key_env"), source=url, metadata=item.get("metadata", {}),
                 ))
         return result
 
@@ -168,9 +163,8 @@ class ProviderDiscovery:
         except Exception:
             return []
         return [DiscoveredEndpoint(
-            provider="ollama", model=item["name"], base_url=base,
-            context_window=32768, tool_support=True, task_fit=0.75,
-            reliability=0.9, latency_ms=500, billing_type="local",
+            provider="ollama", model=item["name"], base_url=base, context_window=32768,
+            tool_support=True, task_fit=0.75, reliability=0.9, latency_ms=500, billing_type="local",
             source="ollama:/api/tags", metadata=item,
         ) for item in data.get("models", []) if item.get("name")]
 
@@ -187,7 +181,6 @@ class ProviderDiscovery:
 
 
 def _is_free_pricing(pricing: Any) -> bool:
-    """Recognize common zero-price catalog representations without guessing."""
     if pricing is None:
         return False
     if isinstance(pricing, (int, float)):
@@ -205,5 +198,4 @@ def _is_free_pricing(pricing: Any) -> bool:
 
 
 def env_api_key(env_name: str | None) -> str | None:
-    """Resolve a provider secret without ever storing the secret in the catalog."""
     return os.getenv(env_name) if env_name else None
