@@ -1,7 +1,7 @@
 [project]
 name = "multi-model-agent"
-version = "0.2.0"
-description = "Resumable multi-model coding-agent control plane with automatic provider discovery"
+version = "0.4.0"
+description = "Resumable multi-model coding-agent control plane with durable storage, leases, routing, and workers"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -13,6 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+redis = ["redis>=6,<7"]
+all = ["psycopg[binary]>=3.2,<4", "redis>=6,<7"]
 dev = ["pytest>=8,<9"]
 
 [tool.pytest.ini_options]
