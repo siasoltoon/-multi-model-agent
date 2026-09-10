@@ -89,6 +89,45 @@ The control plane dispatches a task with a stable task ID and persistent branch 
 
 Set `AGENT_GITHUB_CALLBACK_TOKEN` in the control plane and the matching `AGENT_CALLBACK_TOKEN` GitHub Actions secret to authenticate worker callbacks. Provider API keys can be supplied to the worker as repository secrets using the same variables listed above; no API key is committed to the repository.
 
+## Railway deployment
+
+The repository includes a production `Dockerfile` and `railway.toml`. Railway should run the control plane as a single web service initially, with PostgreSQL as the production source of truth and Redis enabled when distributed queue/event delivery is needed.
+
+### Required Railway variables
+
+Set these in the control-plane service:
+
+- `AGENT_DATABASE_URL` — point this to the Railway PostgreSQL `DATABASE_URL` value.
+- `AGENT_GITHUB_TOKEN` — token permitted to dispatch the worker workflow.
+- `AGENT_GITHUB_WORKER_REPOSITORY` — repository containing `.github/workflows/agent-worker.yml`.
+- `AGENT_PUBLIC_BASE_URL` — the public HTTPS URL of the Railway control plane.
+- `AGENT_GITHUB_CALLBACK_TOKEN` — strong random callback secret.
+
+Recommended production values:
+
+- `AGENT_WORKER_AUTH_TOKEN` — strong random token if worker API authentication is enabled.
+- `AGENT_MAX_WORKER_ATTEMPTS=5`
+- `AGENT_WORKER_LEASE_SECONDS=300`
+- `AGENT_MAX_PROVIDER_FAILOVERS=3`
+- `AGENT_MODEL_REQUEST_TIMEOUT_SECONDS=180`
+
+Optional:
+
+- `AGENT_REDIS_URL` — Railway Redis connection URL for distributed queue/event bus.
+- Provider API keys such as `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, and `MISTRAL_API_KEY`.
+
+Do not commit any of these secrets. The worker callback secret must match between the control plane and the GitHub Actions repository secret `AGENT_CALLBACK_TOKEN`.
+
+### First deployment checklist
+
+1. Create the Railway service from this repository.
+2. Provision PostgreSQL and set `AGENT_DATABASE_URL` to its connection URL.
+3. Set `AGENT_PUBLIC_BASE_URL` after the Railway domain is available.
+4. Configure the GitHub token, worker repository/ref/workflow, and callback secret.
+5. Deploy and confirm `/health` reports a healthy application and PostgreSQL connection.
+6. Add Redis only when multiple workers/distributed queueing is required.
+7. Submit a small test task from the CLI and use `multi-model-agent watch TASK_ID` to observe the full lifecycle.
+
 ## Configuration
 
 Important defaults: 32 normal steps, 64 maximum steps, 6 self-repair attempts, 1800s task timeout, 180s model request timeout, 3 provider failover candidates, and 300s worker lease. Production deployments should use PostgreSQL and may add Redis for multiple workers.
