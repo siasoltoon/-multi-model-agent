@@ -1,0 +1,57 @@
+name: agent-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_prompt:
+        description: Coding task for the agent
+        required: true
+        type: string
+      max_steps:
+        description: Maximum agent steps
+        required: false
+        default: '64'
+        type: string
+      repository:
+        description: Repository to work on, e.g. owner/name
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: workspace
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install agent
+        run: pip install -e '.[dev]'
+      - name: Execute agent
+        env:
+          AGENT_TASK_PROMPT: ${{ inputs.task_prompt }}
+          AGENT_MAX_STEPS: ${{ inputs.max_steps }}
+          AGENT_WORKSPACE: ${{ github.workspace }}/workspace
+          AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
+          AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+        run: python -m agent_platform.worker_entry
+      - name: Commit verified changes
+        working-directory: workspace
+        run: |
+          git config user.name 'multi-model-agent[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m 'agent: apply verified task changes'
+            git push
+          fi
