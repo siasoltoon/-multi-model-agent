@@ -79,7 +79,8 @@ class SmartRouter:
                 raise RuntimeError("no healthy model endpoint available")
 
         def score(e: ModelEndpoint) -> float:
-            fit = max(0.05, min(1.0, e.task_fit * task_fit * self._task_multiplier(e, task_type)))
+            explicit_fit = self._task_multiplier(e, task_type)
+            fit = max(0.05, min(1.0, (explicit_fit if explicit_fit != 1.0 else e.task_fit) * task_fit))
             reliability = max(0.05, min(1.0, e.reliability))
             quota = max(0.05, min(1.0, e.quota_remaining))
             speed = self._latency_score(e.latency_ms)
