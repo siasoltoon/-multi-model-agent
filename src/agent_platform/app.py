@@ -53,17 +53,11 @@ def _register(items):
     for item in items:
         metadata = dict(item.metadata or {})
         metadata["billing_type"] = item.billing_type
-        router.register(ModelEndpoint(
-            id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
-            model=item.model, base_url=item.base_url, context_window=item.context_window,
-            tool_support=item.tool_support, task_fit=item.task_fit, reliability=item.reliability,
-            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env, metadata=metadata,
-        ))
+        router.register(ModelEndpoint(id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider, model=item.model, base_url=item.base_url, context_window=item.context_window, tool_support=item.tool_support, task_fit=item.task_fit, reliability=item.reliability, latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env, metadata=metadata))
 
 
 @app.on_event("startup")
-async def startup_discovery():
-    _register(await discovery.discover())
+async def startup_discovery(): _register(await discovery.discover())
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -73,8 +67,7 @@ def health():
         try:
             from .queue import RedisTaskQueue
             redis_ok = RedisTaskQueue(settings.redis_url).ping()
-        except Exception:
-            redis_ok = False
+        except Exception: redis_ok = False
     return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
 
 
@@ -152,17 +145,10 @@ def _dispatch(task: Task) -> dict:
     task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": settings.github_worker_workflow, "callback_url": callback_url})
     checkpoint = redact_secrets(task.checkpoint or {})
     checkpoint_json = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
-    if len(checkpoint_json) > 50_000:
-        checkpoint_json = json.dumps({"version": 2, "steps": task.current_step, "repairs": task.repair_attempts, "truncated": True}, separators=(",", ":"))
+    if len(checkpoint_json) > 50_000: checkpoint_json = json.dumps({"version": 2, "steps": task.current_step, "repairs": task.repair_attempts, "truncated": True}, separators=(",", ":"))
     next_attempt = task.attempts + 1
-    dispatch_result = dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
-        "task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps),
-        "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)),
-        "working_branch": branch, "callback_url": callback_url, "checkpoint_json": checkpoint_json,
-    })
-    task.attempts = next_attempt
-    task.status = TaskStatus.RUNNING
-    task.error = None
+    dispatch_result = dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {"task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps), "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)), "working_branch": branch, "callback_url": callback_url, "checkpoint_json": checkpoint_json})
+    task.attempts = next_attempt; task.status = TaskStatus.RUNNING; task.error = None
     task.metadata["last_dispatch_idempotency_key"] = f"{task.id}:{next_attempt}"
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
@@ -190,20 +176,13 @@ def resume_task(task_id: UUID):
 def cancel_task(task_id: UUID):
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
-    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
-        return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
+    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}: return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
     remote = {"attempted": False, "cancel_requested": False}
     repository = str(task.metadata.get("repository") or settings.github_worker_repository or "")
     if task.worker_run_id and repository and settings.github_token:
-        try:
-            remote = {"attempted": True, **GitHubActionsDispatcher(settings.github_token).cancel_run(repository, task.worker_run_id)}
-        except Exception as exc:
-            remote = {"attempted": True, "cancel_requested": False, "error": redact_secrets(str(exc))}
-    task.status = TaskStatus.CANCELLED
-    task.error = "cancelled by user"
-    task.metadata["cancelled_at"] = time.time()
-    task.metadata["cancelled"] = True
-    task.metadata["remote_cancel"] = remote
+        try: remote = {"attempted": True, **GitHubActionsDispatcher(settings.github_token).cancel_run(repository, task.worker_run_id)}
+        except Exception as exc: remote = {"attempted": True, "cancel_requested": False, "error": redact_secrets(str(exc))}
+    task.status = TaskStatus.CANCELLED; task.error = "cancelled by user"; task.metadata["cancelled_at"] = time.time(); task.metadata["cancelled"] = True; task.metadata["remote_cancel"] = remote
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "cancelled", {"by": "user", "remote_cancel": remote})
     return {"task_id": str(task.id), "cancelled": True, "status": task.status.value, "remote_cancel": remote}
@@ -232,8 +211,7 @@ async def worker_callback(task_id: UUID, request: Request, payload: dict, author
     secret = settings.github_callback_token
     if secret:
         if not verify_callback_signature(secret, x_agent_timestamp or "", body, x_agent_signature or "", tolerance_seconds=settings.callback_signature_tolerance_seconds): raise HTTPException(401, "invalid or expired callback signature")
-    else:
-        _callback_authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    else: _callback_authorized(authorization.removeprefix("Bearer ") if authorization else None)
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
     run_id = str(payload.get("run_id") or "")
@@ -242,27 +220,21 @@ async def worker_callback(task_id: UUID, request: Request, payload: dict, author
     if task.status == TaskStatus.CANCELLED:
         if hasattr(store, "event"): store.event(task.id, "late_worker_result_ignored", {"run_id": run_id})
         return {"accepted": True, "ignored": True, "status": task.status.value}
-    expected_attempt = int(task.attempts)
-    callback_attempt = int(payload.get("attempt", expected_attempt))
+    expected_attempt = int(task.attempts); callback_attempt = int(payload.get("attempt", expected_attempt))
     if callback_attempt < expected_attempt:
         if hasattr(store, "event"): store.event(task.id, "stale_worker_result_ignored", {"run_id": run_id, "callback_attempt": callback_attempt, "expected_attempt": expected_attempt})
         return {"accepted": True, "ignored": True, "stale": True, "status": task.status.value}
-    task.worker_id = payload.get("worker_id") or task.worker_id
-    task.worker_run_id = run_id or task.worker_run_id
-    task.current_step = int(payload.get("steps", task.current_step))
-    task.repair_attempts = int(payload.get("repairs", task.repair_attempts))
-    task.result = redact_secrets(payload)
-    status = str(payload.get("status", "failed"))
-    task.status = TaskStatus.COMPLETED if status == "completed" else TaskStatus.CHECKPOINTED if status == "checkpointed" else TaskStatus.FAILED
+    task.worker_id = payload.get("worker_id") or task.worker_id; task.worker_run_id = run_id or task.worker_run_id
+    task.current_step = int(payload.get("steps", task.current_step)); task.repair_attempts = int(payload.get("repairs", task.repair_attempts)); task.result = redact_secrets(payload)
+    status = str(payload.get("status", "failed")); task.status = TaskStatus.COMPLETED if status == "completed" else TaskStatus.CHECKPOINTED if status == "checkpointed" else TaskStatus.FAILED
     task.error = redact_secrets(str(payload["error"])) if payload.get("error") else None
-    if status == "checkpointed": task.checkpoint = {"version": 2, "messages": redact_secrets(payload.get("messages", [])), "steps": task.current_step, "repairs": task.repair_attempts, "run_id": run_id}
-    if run_id:
-        accepted_runs.append(run_id); task.metadata["accepted_worker_runs"] = accepted_runs[-20:]
+    if status == "checkpointed":
+        task.checkpoint = {"version": 2, "task_id": str(task.id), "active_role": payload.get("active_role"), "phases": redact_secrets(payload.get("phases", [])), "messages": redact_secrets(payload.get("messages", [])), "steps": task.current_step, "repairs": task.repair_attempts, "run_id": run_id}
+    if run_id: accepted_runs.append(run_id); task.metadata["accepted_worker_runs"] = accepted_runs[-20:]
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "worker_result", {"status": status, "step": task.current_step, "attempt": task.attempts, "run_id": run_id})
     max_attempts = int(task.metadata.get("max_worker_attempts", settings.max_worker_attempts))
-    if status == "checkpointed" and task.attempts < max_attempts and task.status != TaskStatus.CANCELLED:
-        return {"accepted": True, "resume_scheduled": True, **_dispatch(task)}
+    if status == "checkpointed" and task.attempts < max_attempts and task.status != TaskStatus.CANCELLED: return {"accepted": True, "resume_scheduled": True, **_dispatch(task)}
     return {"accepted": True, "resume_scheduled": False, "status": task.status.value}
 
 
