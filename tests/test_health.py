@@ -18,7 +18,7 @@ def test_probe_marks_online_and_records_latency(monkeypatch):
             return False
 
         async def get(self, url, headers=None):
-            return httpx.Response(200, headers={"x-ratelimit-remaining": "80", "x-ratelimit-limit": "100"})
+            return httpx.Response(200, request=httpx.Request("GET", url), headers={"x-ratelimit-remaining": "80", "x-ratelimit-limit": "100"})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     result = asyncio.run(monitor.probe(router.endpoints[0]))
@@ -42,7 +42,7 @@ def test_probe_marks_rate_limited(monkeypatch):
             return False
 
         async def get(self, url, headers=None):
-            return httpx.Response(429, headers={"retry-after": "30"})
+            return httpx.Response(429, request=httpx.Request("GET", url), headers={"retry-after": "30"})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     result = asyncio.run(monitor.probe(endpoint))
@@ -67,7 +67,7 @@ def test_ollama_probe_uses_tags_endpoint(monkeypatch):
 
         async def get(self, url, headers=None):
             seen.append(url)
-            return httpx.Response(200, json={"models": []})
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"models": []})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     asyncio.run(monitor.probe(endpoint))
