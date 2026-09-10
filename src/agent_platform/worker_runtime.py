@@ -88,7 +88,8 @@ async def run_worker() -> int:
                 lease_id = str(assignment["lease_id"])
                 attempt = int(assignment.get("attempt", task.attempts))
 
-                await client.post(f"{base_url}/api/workers/{worker_id}/heartbeat", headers=headers, params={"status": "busy", "lease_id": lease_id})
+                heartbeat = await client.post(f"{base_url}/api/workers/{worker_id}/heartbeat", headers=headers, params={"status": "busy", "lease_id": lease_id})
+                heartbeat.raise_for_status()
                 try:
                     result = await run_task(task, router, workspace)
                     payload = dict(result)
@@ -102,6 +103,8 @@ async def run_worker() -> int:
                 except Exception as exc:
                     payload = {"status": "failed", "error": str(exc), "worker_id": worker_id, "attempt": attempt, "steps": task.current_step, "repairs": task.repair_attempts}
 
+                heartbeat = await client.post(f"{base_url}/api/workers/{worker_id}/heartbeat", headers=headers, params={"status": "online", "lease_id": lease_id})
+                heartbeat.raise_for_status()
                 callback = await client.post(f"{base_url}/api/tasks/{task.id}/worker-callback", headers=headers, json=payload)
                 callback.raise_for_status()
                 await client.delete(f"{base_url}/api/workers/{worker_id}/lease/{lease_id}", headers=headers)
