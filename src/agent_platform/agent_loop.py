@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .adapters import ModelAdapter, ModelResponse
+from .context_saver import ContextSaver
 
 
 @dataclass
@@ -25,6 +26,7 @@ class AgentLoop:
         self.adapter = adapter
         self.tools = tools
         self.policy = policy or AgentPolicy()
+        self.context_saver = ContextSaver()
 
     async def run(self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]]) -> dict[str, Any]:
         started = time.monotonic()
@@ -35,8 +37,9 @@ class AgentLoop:
             if time.monotonic() - started >= self.policy.timeout_seconds:
                 return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
             steps += 1
+            model_history = self.context_saver.compact(history)
             try:
-                response: ModelResponse = await self.adapter.generate(history, tools=tool_specs)
+                response: ModelResponse = await self.adapter.generate(model_history, tools=tool_specs)
             except Exception as exc:
                 if repairs < self.policy.repair_attempts:
                     repairs += 1
