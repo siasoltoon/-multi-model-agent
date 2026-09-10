@@ -190,14 +190,23 @@ def resume_task(task_id: UUID):
 def cancel_task(task_id: UUID):
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
-    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}: return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
+    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
+        return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
+    remote = {"attempted": False, "cancel_requested": False}
+    repository = str(task.metadata.get("repository") or settings.github_worker_repository or "")
+    if task.worker_run_id and repository and settings.github_token:
+        try:
+            remote = {"attempted": True, **GitHubActionsDispatcher(settings.github_token).cancel_run(repository, task.worker_run_id)}
+        except Exception as exc:
+            remote = {"attempted": True, "cancel_requested": False, "error": redact_secrets(str(exc))}
     task.status = TaskStatus.CANCELLED
     task.error = "cancelled by user"
     task.metadata["cancelled_at"] = time.time()
     task.metadata["cancelled"] = True
+    task.metadata["remote_cancel"] = remote
     store.save(task)
-    if hasattr(store, "event"): store.event(task.id, "cancelled", {"by": "user"})
-    return {"task_id": str(task.id), "cancelled": True, "status": task.status.value}
+    if hasattr(store, "event"): store.event(task.id, "cancelled", {"by": "user", "remote_cancel": remote})
+    return {"task_id": str(task.id), "cancelled": True, "status": task.status.value, "remote_cancel": remote}
 
 
 @app.post("/api/tasks/{task_id}/run")
