@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from .config import settings
 from .discovery import ProviderDiscovery
 from .engine import AgentEngine
@@ -18,12 +18,14 @@ from .persistent_store import PersistentTaskStore
 from .reliability import redact_secrets, verify_callback_signature
 from .router import ModelEndpoint, SmartRouter
 from .runner import run_task
+from .worker_orchestrator import WorkerKind, WorkerOrchestrator
+from .worker_protocol import WorkerProtocol
 from .workers import Worker, WorkerRegistry, WorkerStatus
 
 RELEASE_VERSION = "1.0.0"
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REF_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
-_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._/-]+\.ya?ml$")
+_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._/-]+\\.ya?ml$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
 
 
@@ -43,6 +45,8 @@ leases = None
 if settings.database_url.startswith(("postgresql://", "postgres://")):
     from .persistent_leases import PersistentWorkerLeases
     leases = PersistentWorkerLeases(settings.database_url)
+local_leases = WorkerProtocol()
+orchestrator = WorkerOrchestrator(workers, github_enabled=True)
 app = FastAPI(title=settings.app_name, version=RELEASE_VERSION)
 
 
@@ -188,7 +192,7 @@ def plan_task(task_id: UUID):
     return {"task_id": str(task.id), "nodes": [{"id": n.id, "role": n.role, "dependencies": sorted(n.dependencies)} for n in plan.dag.nodes.values()]}
 
 
-def _dispatch(task: Task) -> dict:
+def _github_dispatch(task: Task) -> dict:
     repository = str(task.metadata.get("repository") or settings.github_worker_repository)
     if not repository: raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
     workflow = str(task.metadata.get("worker_workflow") or settings.github_worker_workflow)
@@ -199,7 +203,7 @@ def _dispatch(task: Task) -> dict:
     if not callback_url: raise HTTPException(400, "AGENT_PUBLIC_BASE_URL is required for automatic worker callbacks")
     _validate_github_target(repository, workflow, ref, branch)
     _validate_callback_url(callback_url)
-    task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": workflow, "worker_ref": ref, "callback_url": callback_url})
+    task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": workflow, "worker_ref": ref, "callback_url": callback_url, "worker_kind": WorkerKind.GITHUB.value})
     checkpoint = redact_secrets(task.checkpoint or {})
     checkpoint_json = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
     if len(checkpoint_json) > 50_000:
@@ -209,8 +213,28 @@ def _dispatch(task: Task) -> dict:
     task.attempts = next_attempt; task.status = TaskStatus.RUNNING; task.error = None
     task.metadata["last_dispatch_idempotency_key"] = f"{task.id}:{next_attempt}"
     store.save(task)
-    if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
+    if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts, "worker_kind": WorkerKind.GITHUB.value})
     return dispatch_result
+
+
+def _dispatch(task: Task) -> dict:
+    candidate = orchestrator.select() if settings.laptop_worker_enabled else None
+    if candidate and candidate.kind == WorkerKind.LAPTOP:
+        task.metadata["worker_kind"] = WorkerKind.LAPTOP.value
+        task.metadata["assigned_worker_id"] = candidate.worker_id
+        task.error = None
+        store.save(task)
+        if hasattr(store, "event"):
+            store.event(task.id, "worker_assigned", {"worker_kind": candidate.kind.value, "worker_id": candidate.worker_id, "priority": candidate.priority})
+        return {"worker_kind": candidate.kind.value, "worker_id": candidate.worker_id, "queued": True}
+    if settings.github_token or settings.github_worker_repository:
+        return _github_dispatch(task)
+    task.metadata.pop("worker_kind", None)
+    task.metadata.pop("assigned_worker_id", None)
+    task.status = TaskStatus.QUEUED
+    store.save(task)
+    if hasattr(store, "event"): store.event(task.id, "worker_unavailable", {})
+    return {"worker_kind": None, "queued": True, "reason": "no live laptop and GitHub Actions is not configured"}
 
 
 @app.post("/api/tasks/{task_id}/dispatch")
@@ -318,7 +342,10 @@ def checkpoint_task(task_id: UUID, step: int = 0):
 
 @app.post("/api/workers/register")
 def register_worker(worker: Worker, authorization: str | None = Header(default=None)):
-    _authorized(authorization.removeprefix("Bearer ") if authorization else None); return workers.register(worker)
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    if not settings.laptop_worker_enabled:
+        raise HTTPException(503, "laptop workers are disabled")
+    return workers.register(worker)
 
 
 @app.post("/api/workers/{worker_id}/heartbeat")
@@ -326,29 +353,82 @@ def heartbeat(worker_id: str, status: WorkerStatus | None = None, lease_id: str 
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
     try: result = workers.heartbeat(worker_id, status)
     except KeyError: raise HTTPException(404, "worker not found")
-    if lease_id and leases: result["lease_renewed"] = leases.renew(worker_id, lease_id, settings.worker_lease_seconds)
+    if lease_id:
+        renewed = leases.renew(worker_id, lease_id, settings.worker_lease_seconds) if leases else local_leases.renew(lease_id, settings.worker_lease_seconds)
+        result["lease_renewed"] = bool(renewed)
     return result
+
+
+def _claim_lease(worker_id: str, task_id: UUID) -> str:
+    lease_id = uuid4().hex
+    if leases:
+        if not leases.claim(worker_id, str(task_id), lease_id, settings.worker_lease_seconds):
+            raise HTTPException(409, "task already leased")
+    else:
+        local_leases.issue(worker_id, str(task_id), lease_id, settings.worker_lease_seconds)
+    return lease_id
+
+
+def _lease_valid(worker_id: str, task_id: UUID, lease_id: str) -> bool:
+    if leases:
+        return bool(leases.valid(worker_id, str(task_id), lease_id))
+    return local_leases.valid(lease_id)
+
+
+@app.post("/api/tasks/claim-next")
+def claim_next_task(authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    if not settings.laptop_worker_enabled:
+        raise HTTPException(503, "laptop workers are disabled")
+    candidates = orchestrator.candidates()
+    laptop_ids = {c.worker_id for c in candidates if c.kind == WorkerKind.LAPTOP}
+    if not laptop_ids:
+        return Response(status_code=204)
+    for task in store.list():
+        if task.status not in {TaskStatus.QUEUED, TaskStatus.CHECKPOINTED}:
+            continue
+        kind = str(task.metadata.get("worker_kind") or "")
+        assigned = str(task.metadata.get("assigned_worker_id") or "")
+        if kind not in {"", WorkerKind.LAPTOP.value}:
+            continue
+        worker_id = assigned if assigned in laptop_ids else sorted(laptop_ids)[0]
+        lease_id = _claim_lease(worker_id, task.id)
+        task.status = TaskStatus.RUNNING
+        task.attempts += 1
+        task.worker_id = worker_id
+        task.worker_run_id = None
+        task.error = None
+        task.metadata["worker_kind"] = WorkerKind.LAPTOP.value
+        task.metadata["assigned_worker_id"] = worker_id
+        store.save(task)
+        if hasattr(store, "event"): store.event(task.id, "worker_claimed", {"worker_id": worker_id, "attempt": task.attempts})
+        return {"task": task.model_dump(mode="json"), "lease_id": lease_id, "attempt": task.attempts}
+    return Response(status_code=204)
 
 
 @app.post("/api/workers/{worker_id}/claim/{task_id}")
 def claim_task(worker_id: str, task_id: UUID, authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
-    if not store.get(task_id): raise HTTPException(404, "task not found")
-    lease_id = uuid4().hex
-    if not leases.claim(worker_id, str(task_id), lease_id, settings.worker_lease_seconds): raise HTTPException(409, "task already leased")
-    return {"task_id": str(task_id), "worker_id": worker_id, "lease_id": lease_id, "ttl_seconds": settings.worker_lease_seconds}
+    if not settings.laptop_worker_enabled: raise HTTPException(503, "laptop workers are disabled")
+    if worker_id not in {c.worker_id for c in orchestrator.candidates() if c.kind == WorkerKind.LAPTOP}: raise HTTPException(409, "worker is not online")
+    task = store.get(task_id)
+    if not task: raise HTTPException(404, "task not found")
+    if task.status not in {TaskStatus.QUEUED, TaskStatus.CHECKPOINTED}: raise HTTPException(409, "task is not claimable")
+    lease_id = _claim_lease(worker_id, task_id)
+    task.status = TaskStatus.RUNNING; task.attempts += 1; task.worker_id = worker_id; task.metadata["worker_kind"] = WorkerKind.LAPTOP.value; task.metadata["assigned_worker_id"] = worker_id; task.error = None
+    store.save(task)
+    return {"task": task.model_dump(mode="json"), "worker_id": worker_id, "lease_id": lease_id, "attempt": task.attempts, "ttl_seconds": settings.worker_lease_seconds}
 
 
 @app.delete("/api/workers/{worker_id}/lease/{lease_id}")
 def release_lease(worker_id: str, lease_id: str, authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
-    return {"released": leases.release(worker_id, lease_id)}
+    released = leases.release(worker_id, lease_id) if leases else local_leases.revoke(lease_id)
+    return {"released": bool(released)}
 
 
 @app.post("/api/workers/{worker_id}/lease/{lease_id}/renew")
 def renew_lease(worker_id: str, lease_id: str, authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
-    return {"renewed": leases.renew(worker_id, lease_id, settings.worker_lease_seconds)}
+    renewed = leases.renew(worker_id, lease_id, settings.worker_lease_seconds) if leases else local_leases.renew(lease_id, settings.worker_lease_seconds)
+    return {"renewed": bool(renewed)}
