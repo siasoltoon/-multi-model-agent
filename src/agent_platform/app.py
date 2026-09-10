@@ -25,7 +25,7 @@ from .workers import Worker, WorkerRegistry, WorkerStatus
 RELEASE_VERSION = "1.0.0"
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REF_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
-_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._/-]+\\.ya?ml$")
+_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._/-]+[.]ya?ml$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
 
 
@@ -369,12 +369,6 @@ def _claim_lease(worker_id: str, task_id: UUID) -> str:
     return lease_id
 
 
-def _lease_valid(worker_id: str, task_id: UUID, lease_id: str) -> bool:
-    if leases:
-        return bool(leases.valid(worker_id, str(task_id), lease_id))
-    return local_leases.valid(lease_id)
-
-
 @app.post("/api/tasks/claim-next")
 def claim_next_task(authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
@@ -430,5 +424,5 @@ def release_lease(worker_id: str, lease_id: str, authorization: str | None = Hea
 @app.post("/api/workers/{worker_id}/lease/{lease_id}/renew")
 def renew_lease(worker_id: str, lease_id: str, authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    renewed = leases.renew(worker_id, lease_id, settings.worker_lease_seconds) if leases else local_leases.renew(lease_id, settings.worker_lease_seconds)
+    renewed = leases.renew(worker_id, lease_id, settings.worker_lease_seconds) if leases else local_leases.renew(lease_id, worker_id, settings.worker_lease_seconds)
     return {"renewed": bool(renewed)}
