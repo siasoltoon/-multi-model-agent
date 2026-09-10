@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class WorkerStatus(str, Enum):
@@ -14,6 +14,8 @@ class WorkerStatus(str, Enum):
 class Worker(BaseModel):
     worker_id: str
     endpoint: str = ""
+    kind: str = "laptop"
+    capabilities: list[str] = Field(default_factory=lambda: ["coding", "testing", "tools"])
     status: WorkerStatus = WorkerStatus.ONLINE
     last_heartbeat: datetime | None = None
 
@@ -52,7 +54,6 @@ class WorkerRegistry:
         return w
 
     def mark_stale(self, timeout_seconds: int = 90) -> list[str]:
-        """Mark workers without a recent heartbeat offline and return their IDs."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, timeout_seconds))
         stale: list[str] = []
         for worker_id, worker in self.workers.items():
