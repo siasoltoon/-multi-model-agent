@@ -48,11 +48,13 @@ def _callback_authorized(token: str | None) -> None:
 
 def _register(items):
     for item in items:
+        metadata = dict(item.metadata or {})
+        metadata["billing_type"] = item.billing_type
         router.register(ModelEndpoint(
             id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
             model=item.model, base_url=item.base_url, context_window=item.context_window,
             tool_support=item.tool_support, task_fit=item.task_fit, reliability=item.reliability,
-            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env, metadata=item.metadata,
+            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env, metadata=metadata,
         ))
 
 
@@ -101,7 +103,7 @@ async def probe_provider_health():
 
 @app.get("/api/providers")
 def providers():
-    return [{"id": e.id, "provider": e.provider, "model": e.model, "base_url": e.base_url, "health": e.health, "context_window": e.context_window, "tool_support": e.tool_support, "latency_ms": e.latency_ms, "quota_remaining": e.quota_remaining, "failures": e.failures} for e in router.endpoints]
+    return [{"id": e.id, "provider": e.provider, "model": e.model, "base_url": e.base_url, "health": e.health, "billing_type": e.metadata.get("billing_type", "unknown"), "context_window": e.context_window, "tool_support": e.tool_support, "latency_ms": e.latency_ms, "quota_remaining": e.quota_remaining, "failures": e.failures} for e in router.endpoints]
 
 
 @app.get("/api/providers/health")
