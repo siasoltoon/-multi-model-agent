@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -17,6 +19,12 @@ from .reliability import redact_secrets, verify_callback_signature
 from .router import ModelEndpoint, SmartRouter
 from .runner import run_task
 from .workers import Worker, WorkerRegistry, WorkerStatus
+
+RELEASE_VERSION = "1.0.0"
+_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REF_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
+_WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._/-]+\.ya?ml$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/@-]{1,255}$")
 
 
 def _store():
@@ -35,7 +43,7 @@ leases = None
 if settings.database_url.startswith(("postgresql://", "postgres://")):
     from .persistent_leases import PersistentWorkerLeases
     leases = PersistentWorkerLeases(settings.database_url)
-app = FastAPI(title=settings.app_name, version="0.6.0")
+app = FastAPI(title=settings.app_name, version=RELEASE_VERSION)
 
 
 def _authorized(token: str | None) -> None:
@@ -49,6 +57,25 @@ def _callback_authorized(token: str | None) -> None:
         raise HTTPException(401, "invalid callback token")
 
 
+def _validate_github_target(repository: str, workflow: str, ref: str, branch: str) -> None:
+    if not _REPOSITORY_RE.fullmatch(repository):
+        raise HTTPException(400, "invalid GitHub repository; expected owner/name")
+    if not _WORKFLOW_RE.fullmatch(workflow) or workflow.startswith("/") or ".." in workflow.split("/"):
+        raise HTTPException(400, "invalid GitHub Actions workflow path")
+    if not _REF_RE.fullmatch(ref) or ref.startswith("/") or ".." in ref.split("/"):
+        raise HTTPException(400, "invalid GitHub Actions ref")
+    if not _BRANCH_RE.fullmatch(branch) or branch.startswith("/") or ".." in branch.split("/"):
+        raise HTTPException(400, "invalid worker branch")
+
+
+def _validate_callback_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        raise HTTPException(400, "callback_url must be an absolute HTTP(S) URL")
+    if settings.public_base_url and parsed.scheme != "https" and settings.public_base_url.startswith("https://"):
+        raise HTTPException(400, "callback_url must use HTTPS when AGENT_PUBLIC_BASE_URL uses HTTPS")
+
+
 def _register(items):
     for item in items:
         metadata = dict(item.metadata or {})
@@ -57,7 +84,31 @@ def _register(items):
 
 
 @app.on_event("startup")
-async def startup_discovery(): _register(await discovery.discover())
+async def startup_lifecycle():
+    _register(await discovery.discover())
+    workers.mark_stale(timeout_seconds=max(30, settings.worker_heartbeat_seconds * 6))
+    if leases:
+        try:
+            leases.reap_expired()
+        except Exception:
+            pass
+    if settings.redis_url:
+        try:
+            from .queue import RedisTaskQueue
+            RedisTaskQueue(settings.redis_url).recover_processing_once()
+        except Exception:
+            pass
+
+
+@app.on_event("shutdown")
+async def shutdown_lifecycle():
+    for resource in (leases, store):
+        close = getattr(resource, "close", None)
+        if close:
+            try:
+                close()
+            except Exception:
+                pass
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -67,13 +118,14 @@ def health():
         try:
             from .queue import RedisTaskQueue
             redis_ok = RedisTaskQueue(settings.redis_url).ping()
-        except Exception: redis_ok = False
+        except Exception:
+            redis_ok = False
     return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
 
 
 @app.get("/")
 def root():
-    return JSONResponse({"name": settings.app_name, "interface": "terminal", "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.", "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent plan", "multi-model-agent events", "multi-model-agent resume", "multi-model-agent cancel", "multi-model-agent run-local"]})
+    return JSONResponse({"name": settings.app_name, "version": RELEASE_VERSION, "interface": "terminal", "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.", "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent plan", "multi-model-agent events", "multi-model-agent resume", "multi-model-agent cancel", "multi-model-agent run-local"]})
 
 
 @app.post("/api/providers/discover")
@@ -106,7 +158,8 @@ def create_task(request: TaskRequest):
         try:
             from .queue import RedisTaskQueue
             RedisTaskQueue(settings.redis_url).enqueue(str(task.id))
-        except Exception: pass
+        except Exception:
+            pass
     return task
 
 
@@ -138,16 +191,21 @@ def plan_task(task_id: UUID):
 def _dispatch(task: Task) -> dict:
     repository = str(task.metadata.get("repository") or settings.github_worker_repository)
     if not repository: raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
+    workflow = str(task.metadata.get("worker_workflow") or settings.github_worker_workflow)
+    ref = str(task.metadata.get("worker_ref") or settings.github_worker_ref)
     dispatcher = GitHubActionsDispatcher(settings.github_token)
     branch = str(task.metadata.get("worker_branch") or f"agent/task-{task.id}")
     callback_url = str(task.metadata.get("callback_url") or settings.public_base_url).rstrip("/")
     if not callback_url: raise HTTPException(400, "AGENT_PUBLIC_BASE_URL is required for automatic worker callbacks")
-    task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": settings.github_worker_workflow, "callback_url": callback_url})
+    _validate_github_target(repository, workflow, ref, branch)
+    _validate_callback_url(callback_url)
+    task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": workflow, "worker_ref": ref, "callback_url": callback_url})
     checkpoint = redact_secrets(task.checkpoint or {})
     checkpoint_json = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
-    if len(checkpoint_json) > 50_000: checkpoint_json = json.dumps({"version": 2, "steps": task.current_step, "repairs": task.repair_attempts, "truncated": True}, separators=(",", ":"))
+    if len(checkpoint_json) > 50_000:
+        checkpoint_json = json.dumps({"version": 2, "steps": task.current_step, "repairs": task.repair_attempts, "truncated": True}, separators=(",", ":"))
     next_attempt = task.attempts + 1
-    dispatch_result = dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {"task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps), "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)), "working_branch": branch, "callback_url": callback_url, "checkpoint_json": checkpoint_json})
+    dispatch_result = dispatcher.dispatch(repository, workflow, ref, {"task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps), "repository": repository, "base_branch": str(task.metadata.get("base_branch", ref)), "working_branch": branch, "callback_url": callback_url, "checkpoint_json": checkpoint_json})
     task.attempts = next_attempt; task.status = TaskStatus.RUNNING; task.error = None
     task.metadata["last_dispatch_idempotency_key"] = f"{task.id}:{next_attempt}"
     store.save(task)
