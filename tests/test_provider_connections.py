@@ -1,5 +1,4 @@
-import pytest
-
+from agent_platform.native_adapters import OpenAINativeAdapter
 from agent_platform.provider_connections import build_provider_adapter, verified_provider_ids
 
 
@@ -11,10 +10,13 @@ def test_verified_provider_ids_are_available():
     assert "deepseek" in ids
 
 
-def test_unverified_provider_requires_native_or_verified_contract(monkeypatch):
+def test_openai_uses_native_adapter(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    with pytest.raises(ValueError, match="not verified"):
-        build_provider_adapter("openai", model="test-model")
+    adapter = build_provider_adapter("openai", model="test-model")
+    assert isinstance(adapter, OpenAINativeAdapter)
+    assert adapter.url == "https://api.openai.com/v1/chat/completions"
+    assert adapter.api_key == "test-key"
+    assert adapter.model == "test-model"
 
 
 def test_verified_provider_uses_contract_base_url(monkeypatch):
