@@ -40,7 +40,7 @@ async def main() -> int:
     router = SmartRouter()
     for item in await ProviderDiscovery().discover():
         router.register(ModelEndpoint(
-            id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider, model=item.model,
+            id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
             model=item.model, base_url=item.base_url, context_window=item.context_window, tool_support=item.tool_support,
             task_fit=item.task_fit, reliability=item.reliability, latency_ms=item.latency_ms,
             api_key_env=item.api_key_env, metadata=item.metadata,
