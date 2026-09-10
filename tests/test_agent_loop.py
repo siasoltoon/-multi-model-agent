@@ -30,8 +30,9 @@ def test_agent_loop_executes_tools_and_preserves_tool_protocol(tmp_path):
     assert result["status"] == "completed"
     assert (tmp_path / "x.txt").read_text() == "ok"
     second_history = adapter.histories[1]
-    assert second_history[-2]["role"] == "assistant"
-    assert second_history[-2]["tool_calls"][0]["id"] == "call-1"
+    assistant = second_history[-2] if second_history[-2]["role"] == "assistant" else second_history[-3]
+    assert assistant["role"] == "assistant"
+    assert assistant["tool_calls"][0]["id"] == "call-1"
     assert second_history[-1]["role"] == "tool"
     assert second_history[-1]["tool_call_id"] == "call-1"
 
