@@ -32,6 +32,13 @@ def _print(value: object) -> None:
         print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
+def _request(method: str, path: str, **kwargs):
+    with httpx.Client(timeout=30) as client:
+        response = client.request(method, f"{_base_url()}{path}", headers=_headers(), **kwargs)
+        response.raise_for_status()
+        return response.json()
+
+
 def submit(prompt: str, steps: int | None, repository: str | None, base_branch: str | None) -> int:
     metadata = {}
     if repository:
@@ -41,21 +48,34 @@ def submit(prompt: str, steps: int | None, repository: str | None, base_branch: 
     payload = {"prompt": prompt, "metadata": metadata}
     if steps:
         payload["max_steps"] = steps
-    with httpx.Client(timeout=30) as client:
-        response = client.post(f"{_base_url()}/api/tasks", json=payload, headers=_headers())
-        response.raise_for_status()
-        task = response.json()
-        response = client.post(f"{_base_url()}/api/tasks/{task['id']}/dispatch", headers=_headers())
-        response.raise_for_status()
-        _print({"task_id": task["id"], "dispatched": response.json()})
+    task = _request("POST", "/api/tasks", json=payload)
+    dispatched = _request("POST", f"/api/tasks/{task['id']}/dispatch")
+    _print({"task_id": task["id"], "dispatched": dispatched})
     return 0
 
 
 def status(task_id: str) -> int:
-    with httpx.Client(timeout=30) as client:
-        response = client.get(f"{_base_url()}/api/tasks/{task_id}", headers=_headers())
-        response.raise_for_status()
-        _print(response.json())
+    _print(_request("GET", f"/api/tasks/{task_id}"))
+    return 0
+
+
+def events(task_id: str) -> int:
+    _print(_request("GET", f"/api/tasks/{task_id}/events"))
+    return 0
+
+
+def plan(task_id: str) -> int:
+    _print(_request("POST", f"/api/tasks/{task_id}/plan"))
+    return 0
+
+
+def resume(task_id: str) -> int:
+    _print(_request("POST", f"/api/tasks/{task_id}/resume"))
+    return 0
+
+
+def cancel(task_id: str) -> int:
+    _print(_request("POST", f"/api/tasks/{task_id}/cancel"))
     return 0
 
 
@@ -66,9 +86,9 @@ def watch(task_id: str, interval: float) -> int:
             response = client.get(f"{_base_url()}/api/tasks/{task_id}", headers=_headers())
             response.raise_for_status()
             task = response.json()
-            state = (task.get("status"), task.get("current_step"), task.get("repair_attempts"), task.get("error"))
+            state = (task.get("status"), task.get("current_step"), task.get("repair_attempts"), task.get("attempts"), task.get("error"))
             if state != last:
-                print(f"[{state[0]}] step={state[1]} repairs={state[2]}")
+                print(f"[{state[0]}] step={state[1]} repairs={state[2]} worker_attempts={state[3]}")
                 if task.get("error"):
                     print(f"error: {task['error']}")
                 last = state
@@ -125,6 +145,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task_id")
     p.add_argument("--interval", type=float, default=2.0)
 
+    p = sub.add_parser("events", help="show task event history")
+    p.add_argument("task_id")
+
+    p = sub.add_parser("plan", help="generate and show the task DAG")
+    p.add_argument("task_id")
+
+    p = sub.add_parser("resume", help="resume a checkpointed or failed task")
+    p.add_argument("task_id")
+
+    p = sub.add_parser("cancel", help="cancel a task")
+    p.add_argument("task_id")
+
     p = sub.add_parser("run-local", help="run the agent directly in this terminal/workspace")
     p.add_argument("prompt")
     p.add_argument("--workspace", default=os.getenv("AGENT_WORKSPACE", os.getcwd()))
@@ -140,6 +172,14 @@ def main() -> int:
         return status(args.task_id)
     if args.command == "watch":
         return watch(args.task_id, args.interval)
+    if args.command == "events":
+        return events(args.task_id)
+    if args.command == "plan":
+        return plan(args.task_id)
+    if args.command == "resume":
+        return resume(args.task_id)
+    if args.command == "cancel":
+        return cancel(args.task_id)
     if args.command == "run-local":
         return asyncio.run(run_local(args.prompt, args.workspace, args.steps))
     return 2
