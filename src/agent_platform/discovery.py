@@ -22,7 +22,8 @@ class ProviderSpec:
 
 
 # Registry entries are catalog metadata. Live discovery is restricted to API
-# contracts that have been explicitly verified in provider_api_catalog.py.
+# contracts explicitly verified in provider_api_catalog.py. A provider no
+# longer needs a second discovery flag: the verified contract is the gate.
 BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
     ProviderSpec(
         item.provider_id,
@@ -33,10 +34,10 @@ BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
     )
     for item in PROVIDER_REGISTRY
     if (
-        item.discovery_supported
-        and item.models_url
+        item.models_url
         and item.base_url
         and item.api_key_env
+        and item.openai_compatible
         and is_api_verified(item.provider_id)
     )
 )
@@ -61,12 +62,7 @@ class DiscoveredEndpoint:
 class ProviderDiscovery:
     """Discover configured providers from the central registry plus local Ollama."""
 
-    def __init__(
-        self,
-        catalog_urls: list[str] | None = None,
-        timeout: float = 15.0,
-        providers: tuple[ProviderSpec, ...] = BUILTIN_PROVIDERS,
-    ):
+    def __init__(self, catalog_urls: list[str] | None = None, timeout: float = 15.0, providers: tuple[ProviderSpec, ...] = BUILTIN_PROVIDERS):
         self.catalog_urls = catalog_urls if catalog_urls is not None else self._env_catalogs()
         self.providers = providers
         self.timeout = timeout
@@ -86,13 +82,11 @@ class ProviderDiscovery:
                 found.extend(await self._discover_openai_compatible(spec, api_key))
             except Exception:
                 continue
-
         for url in self.catalog_urls:
             try:
                 found.extend(await self._load_catalog(url))
             except Exception:
                 continue
-
         found.extend(await self._discover_ollama())
         return self._dedupe(found)
 
@@ -102,7 +96,6 @@ class ProviderDiscovery:
             response = await client.get(spec.models_url, headers=headers)
             response.raise_for_status()
             data = response.json()
-
         items = data.get("data", []) if isinstance(data, dict) else data
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
@@ -112,7 +105,7 @@ class ProviderDiscovery:
             model = str(item["id"])
             context = int(item.get("context_length") or item.get("context_window") or (registry.default_context_window if registry else 32768))
             supported = item.get("supported_parameters") or []
-            tool_support = ("tools" in supported or "tool_choice" in supported or not supported)
+            tool_support = "tools" in supported or "tool_choice" in supported or not supported
             metadata = {
                 "catalog": "openai-compatible",
                 "owned_by": item.get("owned_by"),
