@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -78,12 +80,7 @@ def health():
 
 @app.get("/")
 def root():
-    return JSONResponse({
-        "name": settings.app_name,
-        "interface": "terminal",
-        "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.",
-        "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent plan", "multi-model-agent events", "multi-model-agent resume", "multi-model-agent cancel", "multi-model-agent run-local"],
-    })
+    return JSONResponse({"name": settings.app_name, "interface": "terminal", "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.", "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent plan", "multi-model-agent events", "multi-model-agent resume", "multi-model-agent cancel", "multi-model-agent run-local"]})
 
 
 @app.post("/api/providers/discover")
@@ -104,8 +101,7 @@ def providers():
 
 
 @app.get("/api/providers/health")
-def provider_health_snapshot():
-    return health_monitor.snapshot()
+def provider_health_snapshot(): return health_monitor.snapshot()
 
 
 @app.post("/api/tasks", response_model=Task)
@@ -148,42 +144,45 @@ def plan_task(task_id: UUID):
 
 def _dispatch(task: Task) -> dict:
     repository = str(task.metadata.get("repository") or settings.github_worker_repository)
-    if not repository:
-        raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
+    if not repository: raise HTTPException(400, "repository is required in task metadata or AGENT_GITHUB_WORKER_REPOSITORY")
     dispatcher = GitHubActionsDispatcher(settings.github_token)
     branch = str(task.metadata.get("worker_branch") or f"agent/task-{task.id}")
     callback_url = str(task.metadata.get("callback_url") or settings.public_base_url).rstrip("/")
-    if not callback_url:
-        raise HTTPException(400, "AGENT_PUBLIC_BASE_URL is required for automatic worker callbacks")
+    if not callback_url: raise HTTPException(400, "AGENT_PUBLIC_BASE_URL is required for automatic worker callbacks")
     task.metadata.update({"repository": repository, "worker_branch": branch, "worker_workflow": settings.github_worker_workflow, "callback_url": callback_url})
-    task.attempts += 1
-    task.status = TaskStatus.RUNNING
-    task.error = None
-    store.save(task)
-    if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
-    return dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
+    checkpoint = redact_secrets(task.checkpoint or {})
+    checkpoint_json = json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
+    if len(checkpoint_json) > 50_000:
+        checkpoint_json = json.dumps({"version": 2, "steps": task.current_step, "repairs": task.repair_attempts, "truncated": True}, separators=(",", ":"))
+    next_attempt = task.attempts + 1
+    dispatch_result = dispatcher.dispatch(repository, settings.github_worker_workflow, settings.github_worker_ref, {
         "task_id": str(task.id), "task_prompt": task.prompt, "max_steps": str(task.max_steps),
         "repository": repository, "base_branch": str(task.metadata.get("base_branch", settings.github_worker_ref)),
-        "working_branch": branch, "callback_url": callback_url,
+        "working_branch": branch, "callback_url": callback_url, "checkpoint_json": checkpoint_json,
     })
+    task.attempts = next_attempt
+    task.status = TaskStatus.RUNNING
+    task.error = None
+    task.metadata["last_dispatch_idempotency_key"] = f"{task.id}:{next_attempt}"
+    store.save(task)
+    if hasattr(store, "event"): store.event(task.id, "worker_dispatched", {"repository": repository, "branch": branch, "attempt": task.attempts})
+    return dispatch_result
 
 
 @app.post("/api/tasks/{task_id}/dispatch")
 def dispatch_task(task_id: UUID):
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
-    if task.status == TaskStatus.RUNNING:
-        raise HTTPException(409, "task is already running")
+    if task.status == TaskStatus.RUNNING: raise HTTPException(409, "task is already running")
     return {"task_id": str(task.id), **_dispatch(task)}
 
 
 @app.post("/api/tasks/{task_id}/resume")
 def resume_task(task_id: UUID):
     task = store.get(task_id)
-    if not task.checkpoint and task.status not in {TaskStatus.FAILED, TaskStatus.CHECKPOINTED}:
-        raise HTTPException(409, "task has no resumable checkpoint")
-    if task.status == TaskStatus.RUNNING:
-        raise HTTPException(409, "task is already running")
+    if not task: raise HTTPException(404, "task not found")
+    if task.status == TaskStatus.RUNNING: raise HTTPException(409, "task is already running")
+    if not task.checkpoint and task.status not in {TaskStatus.FAILED, TaskStatus.CHECKPOINTED}: raise HTTPException(409, "task has no resumable checkpoint")
     return {"task_id": str(task.id), "resumed": True, **_dispatch(task)}
 
 
@@ -191,11 +190,11 @@ def resume_task(task_id: UUID):
 def cancel_task(task_id: UUID):
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
-    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
-        return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
+    if task.status in {TaskStatus.COMPLETED, TaskStatus.CANCELLED}: return {"task_id": str(task.id), "cancelled": task.status == TaskStatus.CANCELLED, "status": task.status.value}
     task.status = TaskStatus.CANCELLED
     task.error = "cancelled by user"
-    task.metadata["cancelled_at"] = asyncio.get_event_loop().time()
+    task.metadata["cancelled_at"] = time.time()
+    task.metadata["cancelled"] = True
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "cancelled", {"by": "user"})
     return {"task_id": str(task.id), "cancelled": True, "status": task.status.value}
@@ -218,29 +217,19 @@ async def execute_task(task_id: UUID, workspace: str):
 
 
 @app.post("/api/tasks/{task_id}/worker-callback")
-async def worker_callback(
-    task_id: UUID,
-    request: Request,
-    payload: dict,
-    authorization: str | None = Header(default=None),
-    x_agent_timestamp: str | None = Header(default=None),
-    x_agent_signature: str | None = Header(default=None),
-):
+async def worker_callback(task_id: UUID, request: Request, payload: dict, authorization: str | None = Header(default=None), x_agent_timestamp: str | None = Header(default=None), x_agent_signature: str | None = Header(default=None)):
     body = await request.body()
-    if len(body) > settings.model_max_response_bytes:
-        raise HTTPException(413, "callback payload too large")
+    if len(body) > settings.model_max_response_bytes: raise HTTPException(413, "callback payload too large")
     secret = settings.github_callback_token
     if secret:
-        if not verify_callback_signature(secret, x_agent_timestamp or "", body, x_agent_signature or "", tolerance_seconds=settings.callback_signature_tolerance_seconds):
-            raise HTTPException(401, "invalid or expired callback signature")
+        if not verify_callback_signature(secret, x_agent_timestamp or "", body, x_agent_signature or "", tolerance_seconds=settings.callback_signature_tolerance_seconds): raise HTTPException(401, "invalid or expired callback signature")
     else:
         _callback_authorized(authorization.removeprefix("Bearer ") if authorization else None)
     task = store.get(task_id)
     if not task: raise HTTPException(404, "task not found")
     run_id = str(payload.get("run_id") or "")
     accepted_runs = task.metadata.setdefault("accepted_worker_runs", [])
-    if run_id and run_id in accepted_runs:
-        return {"accepted": True, "duplicate": True, "status": task.status.value}
+    if run_id and run_id in accepted_runs: return {"accepted": True, "duplicate": True, "status": task.status.value}
     if task.status == TaskStatus.CANCELLED:
         if hasattr(store, "event"): store.event(task.id, "late_worker_result_ignored", {"run_id": run_id})
         return {"accepted": True, "ignored": True, "status": task.status.value}
@@ -257,11 +246,9 @@ async def worker_callback(
     status = str(payload.get("status", "failed"))
     task.status = TaskStatus.COMPLETED if status == "completed" else TaskStatus.CHECKPOINTED if status == "checkpointed" else TaskStatus.FAILED
     task.error = redact_secrets(str(payload["error"])) if payload.get("error") else None
-    if status == "checkpointed":
-        task.checkpoint = {"version": 2, "messages": redact_secrets(payload.get("messages", [])), "steps": task.current_step, "repairs": task.repair_attempts, "run_id": run_id}
+    if status == "checkpointed": task.checkpoint = {"version": 2, "messages": redact_secrets(payload.get("messages", [])), "steps": task.current_step, "repairs": task.repair_attempts, "run_id": run_id}
     if run_id:
-        accepted_runs.append(run_id)
-        task.metadata["accepted_worker_runs"] = accepted_runs[-20:]
+        accepted_runs.append(run_id); task.metadata["accepted_worker_runs"] = accepted_runs[-20:]
     store.save(task)
     if hasattr(store, "event"): store.event(task.id, "worker_result", {"status": status, "step": task.current_step, "attempt": task.attempts, "run_id": run_id})
     max_attempts = int(task.metadata.get("max_worker_attempts", settings.max_worker_attempts))
@@ -300,8 +287,7 @@ def heartbeat(worker_id: str, status: WorkerStatus | None = None, lease_id: str 
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
     try: result = workers.heartbeat(worker_id, status)
     except KeyError: raise HTTPException(404, "worker not found")
-    if lease_id and leases:
-        result["lease_renewed"] = leases.renew(worker_id, lease_id, settings.worker_lease_seconds)
+    if lease_id and leases: result["lease_renewed"] = leases.renew(worker_id, lease_id, settings.worker_lease_seconds)
     return result
 
 
