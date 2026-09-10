@@ -2,57 +2,76 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 
 class WorkspaceTools:
-    """Safe local workspace tools for an execution worker.
+    """Bounded workspace tools for an execution worker."""
 
-    Every path is resolved below the configured workspace. Shell execution is
-    allowlisted to common development commands and always runs inside it.
-    """
     ALLOWED_COMMANDS = {"python", "pytest", "pip", "npm", "node", "git", "uv", "ruff"}
+    BLOCKED_ARGS = {"--system", "--global", "--user", "--break-system-packages"}
+    MAX_FILE_BYTES = 2_000_000
+    MAX_COMMAND_OUTPUT = 20_000
 
     def __init__(self, workspace: str, command_timeout: float = 300):
         self.root = Path(workspace).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.command_timeout = command_timeout
+        self.command_timeout = max(1.0, float(command_timeout))
 
     def _path(self, relative: str) -> Path:
-        candidate = (self.root / relative).resolve()
+        raw = str(relative or "")
+        if not raw or "\x00" in raw:
+            raise ValueError("invalid workspace path")
+        candidate = (self.root / raw).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise ValueError("path escapes workspace")
         return candidate
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._path(str(args["path"]))
+        if not path.is_file():
+            raise FileNotFoundError(str(path.relative_to(self.root)))
+        if path.stat().st_size > self.MAX_FILE_BYTES:
+            raise ValueError("file exceeds workspace read limit")
         return {"path": str(path.relative_to(self.root)), "content": path.read_text(encoding="utf-8")}
 
     def write_file(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._path(str(args["path"]))
         content = str(args.get("content", ""))
+        encoded = content.encode("utf-8")
+        if len(encoded) > self.MAX_FILE_BYTES:
+            raise ValueError("file exceeds workspace write limit")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return {"path": str(path.relative_to(self.root)), "bytes": len(content.encode("utf-8"))}
+        path.write_bytes(encoded)
+        return {"path": str(path.relative_to(self.root)), "bytes": len(encoded)}
 
-    async def run_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        command = args.get("command")
+    def _argv(self, command: Any) -> list[str]:
         if isinstance(command, list):
             argv = [str(x) for x in command]
         else:
-            import shlex
             argv = shlex.split(str(command or ""), posix=os.name != "nt")
         if not argv or Path(argv[0]).name.lower() not in self.ALLOWED_COMMANDS:
             raise ValueError("command is not allowlisted")
-        proc = await asyncio.create_subprocess_exec(*argv, cwd=self.root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        if any(arg in self.BLOCKED_ARGS for arg in argv[1:]):
+            raise ValueError("command contains a blocked package-management option")
+        return argv
+
+    async def run_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        argv = self._argv(args.get("command"))
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=self.root, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=self.command_timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
             return {"exit_code": -1, "output": "command timed out"}
-        return {"exit_code": proc.returncode, "output": out.decode("utf-8", errors="replace")[-20000:]}
+        return {"exit_code": proc.returncode, "output": out.decode("utf-8", errors="replace")[-self.MAX_COMMAND_OUTPUT:]}
 
     async def git_diff(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.run_command({"command": ["git", "diff", "--no-ext-diff", "--"]})
