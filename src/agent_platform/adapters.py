@@ -9,15 +9,16 @@ class ModelResponse:
     text: str
     raw: dict[str, Any]
     usage: dict[str, Any]
+    tool_calls: list[dict[str, Any]]
 
 
 class ModelAdapter(Protocol):
-    async def generate(self, messages: list[dict[str, str]], *, tools: list[dict[str, Any]] | None = None) -> ModelResponse: ...
+    async def generate(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> ModelResponse: ...
 
 
 class OpenAICompatibleAdapter:
-    """Works with OpenAI-compatible endpoints; provider-specific adapters can subclass it."""
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 180):
+    """OpenAI-compatible chat-completions adapter with native tool-call support."""
+    def __init__(self, base_url: str, api_key: str = "", model: str = "", timeout: float = 180):
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.api_key = api_key
         self.model = model
@@ -27,10 +28,17 @@ class OpenAICompatibleAdapter:
         payload = {"model": self.model, "messages": messages}
         if tools:
             payload["tools"] = tools
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(self.url, headers={"Authorization": f"Bearer {self.api_key}"}, json=payload)
+            response = await client.post(self.url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
-        return ModelResponse(message.get("content", ""), data, data.get("usage", {}))
+        calls: list[dict[str, Any]] = []
+        for call in message.get("tool_calls", []) or []:
+            fn = call.get("function", {})
+            calls.append({"id": call.get("id"), "name": fn.get("name", ""), "arguments": fn.get("arguments", "{}")})
+        return ModelResponse(message.get("content") or "", data, data.get("usage", {}), calls)
