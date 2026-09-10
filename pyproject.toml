@@ -19,7 +19,8 @@ multi-model-agent = "agent_platform.cli:main"
 postgres = ["psycopg[binary]>=3.2,<4"]
 redis = ["redis>=6,<7"]
 all = ["psycopg[binary]>=3.2,<4", "redis>=6,<7"]
-dev = ["pytest>=8,<9"]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<2"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
+asyncio_mode = "auto"
