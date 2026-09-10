@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     github_worker_workflow: str = "agent-worker.yml"
     github_worker_ref: str = "main"
     github_callback_token: str = ""
+    public_base_url: str = ""
     model_config = SettingsConfigDict(env_prefix="AGENT_", env_file=".env", extra="ignore")
 
 
