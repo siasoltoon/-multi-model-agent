@@ -6,7 +6,8 @@ from typing import Any
 
 import httpx
 
-from .provider_registry import PROVIDER_REGISTRY, ProviderDefinition
+from .provider_api_catalog import is_api_verified
+from .provider_registry import PROVIDER_REGISTRY
 
 
 @dataclass(frozen=True)
@@ -20,8 +21,8 @@ class ProviderSpec:
     auth_scheme: str = "bearer"
 
 
-# Only providers with a concrete model catalog and OpenAI-compatible discovery
-# are activated here. The registry can contain candidates without causing traffic.
+# Registry entries are catalog metadata. Live discovery is restricted to API
+# contracts that have been explicitly verified in provider_api_catalog.py.
 BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
     ProviderSpec(
         item.provider_id,
@@ -31,7 +32,13 @@ BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
         item.auth_scheme,
     )
     for item in PROVIDER_REGISTRY
-    if item.discovery_supported and item.models_url and item.base_url and item.api_key_env
+    if (
+        item.discovery_supported
+        and item.models_url
+        and item.base_url
+        and item.api_key_env
+        and is_api_verified(item.provider_id)
+    )
 )
 
 
@@ -113,6 +120,7 @@ class ProviderDiscovery:
                 "supported_parameters": supported,
                 "pricing": item.get("pricing"),
                 "registry": registry.to_metadata() if registry else {},
+                "api_verified": True,
             }
             result.append(DiscoveredEndpoint(
                 provider=spec.name,
