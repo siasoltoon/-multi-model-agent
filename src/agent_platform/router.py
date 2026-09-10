@@ -35,14 +35,14 @@ class SmartRouter:
         self.endpoints.append(endpoint)
 
     @staticmethod
-    def _task_multiplier(endpoint: ModelEndpoint, task_type: str) -> float:
+    def _task_multiplier(endpoint: ModelEndpoint, task_type: str) -> float | None:
         capabilities = endpoint.metadata.get("task_fit", {}) if isinstance(endpoint.metadata, dict) else {}
         if isinstance(capabilities, dict) and task_type in capabilities:
             try:
                 return max(0.05, min(1.0, float(capabilities[task_type])))
             except (TypeError, ValueError):
                 pass
-        return 1.0
+        return None
 
     @staticmethod
     def _latency_score(latency_ms: float) -> float:
@@ -80,7 +80,8 @@ class SmartRouter:
 
         def score(e: ModelEndpoint) -> float:
             explicit_fit = self._task_multiplier(e, task_type)
-            fit = max(0.05, min(1.0, (explicit_fit if explicit_fit != 1.0 else e.task_fit) * task_fit))
+            effective_fit = e.task_fit if explicit_fit is None else explicit_fit
+            fit = max(0.05, min(1.0, effective_fit * task_fit))
             reliability = max(0.05, min(1.0, e.reliability))
             quota = max(0.05, min(1.0, e.quota_remaining))
             speed = self._latency_score(e.latency_ms)
