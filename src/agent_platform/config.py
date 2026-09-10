@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     task_timeout_seconds: int = 1800
     worker_heartbeat_seconds: int = 15
     worker_lease_seconds: int = 300
+    worker_poll_seconds: int = 5
     model_request_timeout_seconds: int = 180
     worker_auth_token: str = ""
     github_token: str = ""
