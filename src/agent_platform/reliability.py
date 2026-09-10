@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,3 +51,23 @@ def checkpoint_payload(task_id: str, phase: str, messages: list[dict[str, Any]],
         "repairs": repairs,
         "messages": redact_secrets(messages),
     }
+
+
+def callback_signature(secret: str, timestamp: str, body: bytes) -> str:
+    """Return a GitHub-webhook-style HMAC signature for callback bodies."""
+    digest = hmac.new(secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def verify_callback_signature(secret: str, timestamp: str, body: bytes, signature: str, *, tolerance_seconds: int = 300, now: float | None = None) -> bool:
+    if not secret or not timestamp or not signature:
+        return False
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    current = time.time() if now is None else now
+    if abs(current - ts) > max(1, tolerance_seconds):
+        return False
+    expected = callback_signature(secret, timestamp, body)
+    return hmac.compare_digest(expected, signature)
