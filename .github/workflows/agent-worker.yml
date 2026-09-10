@@ -31,8 +31,7 @@ on:
         type: string
       callback_url:
         description: Control-plane callback URL
-        required: false
-        default: ''
+        required: true
         type: string
 
 permissions:
@@ -78,8 +77,6 @@ jobs:
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
           AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
-          AGENT_CALLBACK_URL: ${{ inputs.callback_url }}
-          AGENT_CALLBACK_TOKEN: ${{ secrets.AGENT_CALLBACK_TOKEN }}
           AGENT_WORKER_ID: github-actions-${{ github.run_id }}
         run: python -m agent_platform.worker_entry
       - name: Commit and push progress
@@ -91,6 +88,7 @@ jobs:
         run: |
           git config user.name 'multi-model-agent[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .agent-result.json
           if [ -z "$(git status --porcelain)" ]; then exit 0; fi
           git add -A
           git commit -m 'agent: apply verified task progress' || true
@@ -108,3 +106,28 @@ jobs:
           if [ "$(git rev-list --count "origin/$BASE_BRANCH..HEAD")" -gt 0 ]; then
             gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$WORKING_BRANCH" --title 'agent: verified task changes' --body 'Resumable automated coding-agent task.'
           fi
+      - name: Report result to control plane
+        if: always()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ secrets.AGENT_CALLBACK_TOKEN }}
+          TASK_ID: ${{ inputs.task_id }}
+          RUN_ID: ${{ github.run_id }}
+          WORKER_ID: github-actions-${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'workspace', '.agent-result.json')
+          if os.path.exists(path):
+              payload = json.load(open(path, encoding='utf-8'))
+          else:
+              payload = {'status': 'failed', 'error': 'worker ended before producing a result'}
+          payload.update({'task_id': os.environ['TASK_ID'], 'run_id': os.environ['RUN_ID'], 'worker_id': os.environ['WORKER_ID']})
+          data = json.dumps(payload, ensure_ascii=False, default=str).encode()
+          request = urllib.request.Request(os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/worker-callback', data=data, headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + os.environ.get('CALLBACK_TOKEN','')}, method='POST')
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(response.read().decode())
+          except Exception as exc:
+              print('callback warning:', exc)
+          PY
