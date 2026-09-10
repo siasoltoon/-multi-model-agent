@@ -8,6 +8,7 @@ from .config import settings
 from .discovery import ProviderDiscovery
 from .engine import AgentEngine
 from .github_dispatcher import GitHubActionsDispatcher
+from .health import ProviderHealthMonitor
 from .models import HealthResponse, Task, TaskRequest, TaskStatus
 from .persistent_store import PersistentTaskStore
 from .router import ModelEndpoint, SmartRouter
@@ -26,6 +27,7 @@ workers = WorkerRegistry()
 router = SmartRouter()
 engine = AgentEngine(router)
 discovery = ProviderDiscovery()
+health_monitor = ProviderHealthMonitor(router)
 leases = None
 if settings.database_url.startswith(("postgresql://", "postgres://")):
     from .persistent_leases import PersistentWorkerLeases
@@ -87,9 +89,24 @@ async def discover_providers():
     return {"count": len(items), "providers": sorted({x.provider for x in items}), "models": sorted({x.model for x in items})}
 
 
+@app.post("/api/providers/health")
+async def probe_provider_health():
+    results = await health_monitor.probe_all()
+    return {
+        "count": len(results),
+        "results": [result.__dict__ for result in results],
+        "providers": health_monitor.snapshot(),
+    }
+
+
 @app.get("/api/providers")
 def providers():
-    return [{"id": e.id, "provider": e.provider, "model": e.model, "base_url": e.base_url, "health": e.health, "context_window": e.context_window, "tool_support": e.tool_support} for e in router.endpoints]
+    return [{"id": e.id, "provider": e.provider, "model": e.model, "base_url": e.base_url, "health": e.health, "context_window": e.context_window, "tool_support": e.tool_support, "latency_ms": e.latency_ms, "quota_remaining": e.quota_remaining, "failures": e.failures} for e in router.endpoints]
+
+
+@app.get("/api/providers/health")
+def provider_health_snapshot():
+    return health_monitor.snapshot()
 
 
 @app.post("/api/tasks", response_model=Task)
