@@ -42,3 +42,27 @@ class OpenAICompatibleAdapter:
             fn = call.get("function", {})
             calls.append({"id": call.get("id"), "name": fn.get("name", ""), "arguments": fn.get("arguments", "{}")})
         return ModelResponse(message.get("content") or "", data, data.get("usage", {}), calls)
+
+
+class FailoverAdapter:
+    """Try ranked provider adapters in order and remember the active endpoint."""
+
+    def __init__(self, adapters: list[tuple[str, ModelAdapter]], on_failure=None):
+        if not adapters:
+            raise ValueError("at least one adapter is required")
+        self.adapters = adapters
+        self.on_failure = on_failure
+        self.active_endpoint_id = adapters[0][0]
+
+    async def generate(self, messages, *, tools=None) -> ModelResponse:
+        last_error: Exception | None = None
+        for endpoint_id, adapter in self.adapters:
+            try:
+                response = await adapter.generate(messages, tools=tools)
+                self.active_endpoint_id = endpoint_id
+                return response
+            except Exception as exc:
+                last_error = exc
+                if self.on_failure:
+                    self.on_failure(endpoint_id, exc)
+        raise last_error or RuntimeError("all model endpoints failed")
