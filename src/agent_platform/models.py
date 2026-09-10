@@ -33,6 +33,9 @@ class Task(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    worker_id: str | None = None
+    worker_run_id: str | None = None
+    attempts: int = 0
 
 
 class HealthResponse(BaseModel):
