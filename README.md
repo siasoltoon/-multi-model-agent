@@ -1,12 +1,14 @@
 # Multi-Model Agent
 
-Provider-agnostic, resumable coding-agent control plane with Web Terminal, DAG planning, model routing, bounded self-repair, durable task state, worker leases, optional Redis queue/event bus, and an automatic GitHub Actions worker.
+Provider-agnostic, resumable coding-agent control plane with terminal-first execution, DAG planning, adaptive model routing, bounded self-repair, durable task state, worker leases, optional Redis queue/event bus, and an automatic GitHub Actions worker.
 
 ## Runtime flow
 
 `task → durable state → plan → route → inspect/edit → test → diff/review → repair → verified result`
 
-For remote execution: `Web Terminal → Railway control plane → GitHub Actions → persistent branch → callback → checkpoint/resume → PR`.
+For remote execution: `terminal → Railway control plane → GitHub Actions → persistent branch → callback → checkpoint/resume → PR`.
+
+The project does not require a dashboard/Web Terminal UI. The CLI is the primary operator interface.
 
 The model never gets unrestricted host access. Workers own filesystem and command execution, paths are constrained to the workspace, and credentials are resolved from environment/secrets rather than stored in task state.
 
@@ -24,13 +26,38 @@ Install production extras with `pip install -e '.[all]'`.
 
 The registry can load operator-declared JSON catalogs from `AGENT_PROVIDER_CATALOGS` and discover local Ollama models from `OLLAMA_BASE_URL/api/tags`. It never harvests, guesses, or stores third-party API keys. One model may have multiple endpoints; routing considers context, tool support, reliability, quota state, latency, and task fit.
 
+**API keys are not automatically created or obtained.** The operator must provide provider credentials through environment variables or Railway/GitHub Actions secrets. After credentials and endpoints are configured, task execution is automatic and does not require manually selecting a model for every task.
+
+## Token/context saver
+
+Long coding tasks can accumulate very large tool outputs. Before every model request, the context saver compacts only historical tool output while preserving system/task instructions and the most recent active turns verbatim. It also de-duplicates repeated tool results and keeps high-signal lines such as errors, test failures, paths, warnings and command summaries.
+
+The default target is **85% reduction of historical tool-output characters**, configurable between 80% and 90%. This is a context/payload reduction target, not a guarantee that every provider bill will drop by exactly 85%: provider tokenization, system tokens and recent turns still contribute to usage. The design deliberately favors retaining information needed for correctness over blindly truncating the conversation.
+
+Environment controls:
+
+- `AGENT_CONTEXT_TARGET_REDUCTION=0.85`
+- `AGENT_CONTEXT_KEEP_RECENT=8`
+- `AGENT_CONTEXT_MAX_TOOL_CHARS=6000`
+
 ## Agent loop
 
-The loop supports up to 64 steps, normal 32-step operation, 6 bounded repair attempts, model tool calling, workspace inspection/editing, tests, git diff inspection, timeout checkpointing, and resumable task state. A checkpoint stores the conversation/tool history needed to continue reasoning on the next worker run.
+The loop supports up to 64 steps, normal 32-step operation, 6 bounded repair attempts, model tool calling, workspace inspection/editing, tests, git diff inspection, timeout checkpointing, context compaction and resumable task state. A checkpoint stores the conversation/tool history needed to continue reasoning on the next worker run.
 
-## Web Terminal
+## Terminal CLI
 
-Open `/` for the built-in terminal. Creating a task can dispatch it directly to the configured GitHub Actions worker. Task state can be streamed through `/api/tasks/{task_id}/stream`, and durable task events are available through `/api/tasks/{task_id}/events`.
+```bash
+multi-model-agent submit "ساخت یک ربات تلگرام دانلودر"
+multi-model-agent run-local "این پروژه را بررسی کن و باگ‌های آن را اصلاح کن"
+multi-model-agent status TASK_ID
+multi-model-agent watch TASK_ID
+multi-model-agent plan TASK_ID
+multi-model-agent events TASK_ID
+multi-model-agent resume TASK_ID
+multi-model-agent cancel TASK_ID
+```
+
+Creating a remote task can dispatch it directly to the configured GitHub Actions worker. Task state can be streamed through `/api/tasks/{task_id}/stream`, and durable task events are available through `/api/tasks/{task_id}/events`.
 
 ## Automatic GitHub worker
 
