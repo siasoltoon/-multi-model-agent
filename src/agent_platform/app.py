@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, StreamingResponse
 from .config import settings
@@ -25,6 +25,10 @@ workers = WorkerRegistry()
 router = SmartRouter()
 engine = AgentEngine(router)
 discovery = ProviderDiscovery()
+leases = None
+if settings.database_url.startswith(("postgresql://", "postgres://")):
+    from .persistent_leases import PersistentWorkerLeases
+    leases = PersistentWorkerLeases(settings.database_url)
 app = FastAPI(title=settings.app_name, version="0.4.0")
 
 
@@ -39,8 +43,7 @@ def _register(items):
             id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
             model=item.model, base_url=item.base_url, context_window=item.context_window,
             tool_support=item.tool_support, task_fit=item.task_fit, reliability=item.reliability,
-            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env,
-            metadata=item.metadata,
+            latency_ms=item.latency_ms, quota_remaining=1.0, api_key_env=item.api_key_env, metadata=item.metadata,
         ))
 
 
@@ -58,7 +61,7 @@ def health():
             redis_ok = RedisTaskQueue(settings.redis_url).ping()
         except Exception:
             redis_ok = False
-    return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if settings.database_url.startswith(("postgresql://", "postgres://")) else "sqlite", "redis": redis_ok}
+    return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -68,8 +71,7 @@ def terminal():
 
 @app.post("/api/providers/discover")
 async def discover_providers():
-    items = await discovery.discover()
-    _register(items)
+    items = await discovery.discover(); _register(items)
     return {"count": len(items), "providers": sorted({x.provider for x in items}), "models": sorted({x.model for x in items})}
 
 
@@ -82,68 +84,52 @@ def providers():
 def create_task(request: TaskRequest):
     task = Task(prompt=request.prompt, max_steps=request.max_steps or settings.max_agent_steps, metadata=request.metadata)
     store.save(task)
-    if hasattr(store, "event"):
-        store.event(task.id, "created", {"max_steps": task.max_steps})
+    if hasattr(store, "event"): store.event(task.id, "created", {"max_steps": task.max_steps})
     if settings.redis_url:
         try:
             from .queue import RedisTaskQueue
             RedisTaskQueue(settings.redis_url).enqueue(str(task.id))
-        except Exception:
-            pass
+        except Exception: pass
     return task
 
 
 @app.get("/api/tasks", response_model=list[Task])
-def list_tasks():
-    return store.list()
+def list_tasks(): return store.list()
 
 
 @app.get("/api/tasks/{task_id}", response_model=Task)
 def get_task(task_id: UUID):
     task = store.get(task_id)
-    if not task:
-        raise HTTPException(404, "task not found")
+    if not task: raise HTTPException(404, "task not found")
     return task
 
 
 @app.get("/api/tasks/{task_id}/events")
 def task_events(task_id: UUID):
-    if not hasattr(store, "events"):
-        raise HTTPException(501, "event listing unavailable on this backend")
+    if not hasattr(store, "events"): raise HTTPException(501, "event listing unavailable")
     return store.events(task_id)
 
 
 @app.post("/api/tasks/{task_id}/plan")
 def plan_task(task_id: UUID):
     task = store.get(task_id)
-    if not task:
-        raise HTTPException(404, "task not found")
-    plan = engine.plan(task)
-    task.status = TaskStatus.PLANNING
-    store.save(task)
+    if not task: raise HTTPException(404, "task not found")
+    plan = engine.plan(task); task.status = TaskStatus.PLANNING; store.save(task)
     return {"task_id": str(task.id), "nodes": [{"id": n.id, "role": n.role, "dependencies": sorted(n.dependencies)} for n in plan.dag.nodes.values()]}
 
 
 @app.post("/api/tasks/{task_id}/run")
 async def execute_task(task_id: UUID, workspace: str):
     task = store.get(task_id)
-    if not task:
-        raise HTTPException(404, "task not found")
-    task.status = TaskStatus.RUNNING
-    store.save(task)
-    try:
-        result = await run_task(task, router, workspace)
+    if not task: raise HTTPException(404, "task not found")
+    task.status = TaskStatus.RUNNING; store.save(task)
+    try: result = await run_task(task, router, workspace)
     except Exception as exc:
-        task.status = TaskStatus.FAILED
-        task.error = str(exc)
-        store.save(task)
-        raise HTTPException(500, str(exc))
+        task.status = TaskStatus.FAILED; task.error = str(exc); store.save(task); raise HTTPException(500, str(exc))
     task.status = TaskStatus.COMPLETED if result.get("status") == "completed" else TaskStatus.CHECKPOINTED if result.get("status") == "checkpointed" else TaskStatus.FAILED
-    if result.get("error"):
-        task.error = str(result["error"])
+    if result.get("error"): task.error = str(result["error"])
     store.save(task)
-    if hasattr(store, "event"):
-        store.event(task.id, task.status.value, {"step": task.current_step, "repairs": task.repair_attempts})
+    if hasattr(store, "event"): store.event(task.id, task.status.value, {"step": task.current_step, "repairs": task.repair_attempts})
     return task
 
 
@@ -153,37 +139,50 @@ async def stream_task(task_id: UUID):
         last = ""
         for _ in range(3600):
             task = store.get(task_id)
-            if not task:
-                yield "event: error\ndata: task not found\n\n"
-                return
+            if not task: yield "event: error\ndata: task not found\n\n"; return
             state = task.model_dump_json()
-            if state != last:
-                yield f"event: task\ndata: {state}\n\n"
-                last = state
-            if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-                return
+            if state != last: yield f"event: task\ndata: {state}\n\n"; last = state
+            if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}: return
             await asyncio.sleep(1)
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 
 
 @app.post("/api/tasks/{task_id}/checkpoint")
 def checkpoint_task(task_id: UUID, step: int = 0):
-    try:
-        return store.checkpoint(task_id, step, {"resumable": True})
-    except KeyError:
-        raise HTTPException(404, "task not found")
+    try: return store.checkpoint(task_id, step, {"resumable": True})
+    except KeyError: raise HTTPException(404, "task not found")
 
 
 @app.post("/api/workers/register")
 def register_worker(worker: Worker, authorization: str | None = Header(default=None)):
-    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    return workers.register(worker)
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None); return workers.register(worker)
 
 
 @app.post("/api/workers/{worker_id}/heartbeat")
 def heartbeat(worker_id: str, status: WorkerStatus | None = None, authorization: str | None = Header(default=None)):
     _authorized(authorization.removeprefix("Bearer ") if authorization else None)
-    try:
-        return workers.heartbeat(worker_id, status)
-    except KeyError:
-        raise HTTPException(404, "worker not found")
+    try: return workers.heartbeat(worker_id, status)
+    except KeyError: raise HTTPException(404, "worker not found")
+
+
+@app.post("/api/workers/{worker_id}/claim/{task_id}")
+def claim_task(worker_id: str, task_id: UUID, authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
+    lease_id = uuid4().hex
+    if not leases.claim(worker_id, str(task_id), lease_id, settings.worker_lease_seconds): raise HTTPException(409, "task already leased")
+    return {"task_id": str(task_id), "worker_id": worker_id, "lease_id": lease_id, "ttl_seconds": settings.worker_lease_seconds}
+
+
+@app.post("/api/workers/{worker_id}/lease/{lease_id}/renew")
+def renew_lease(worker_id: str, lease_id: str, authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
+    return {"renewed": leases.renew(worker_id, lease_id, settings.worker_lease_seconds)}
+
+
+@app.delete("/api/workers/{worker_id}/lease/{lease_id}")
+def release_lease(worker_id: str, lease_id: str, authorization: str | None = Header(default=None)):
+    _authorized(authorization.removeprefix("Bearer ") if authorization else None)
+    if not leases: raise HTTPException(501, "persistent leases require PostgreSQL")
+    return {"released": leases.release(worker_id, lease_id)}
