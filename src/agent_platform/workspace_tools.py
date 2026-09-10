@@ -12,6 +12,7 @@ class WorkspaceTools:
 
     ALLOWED_COMMANDS = {"python", "pytest", "pip", "npm", "node", "git", "uv", "ruff"}
     BLOCKED_ARGS = {"--system", "--global", "--user", "--break-system-packages"}
+    SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY", "AUTH")
     MAX_FILE_BYTES = 2_000_000
     MAX_COMMAND_OUTPUT = 20_000
 
@@ -58,12 +59,23 @@ class WorkspaceTools:
             raise ValueError("command contains a blocked package-management option")
         return argv
 
+    @classmethod
+    def _safe_environment(cls) -> dict[str, str]:
+        """Pass only non-secret environment variables to model-generated commands."""
+        safe: dict[str, str] = {}
+        for key, value in os.environ.items():
+            upper = key.upper()
+            if any(marker in upper for marker in cls.SECRET_ENV_MARKERS):
+                continue
+            safe[key] = value
+        return safe
+
     async def run_command(self, args: dict[str, Any]) -> dict[str, Any]:
         argv = self._argv(args.get("command"))
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=self.root, stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            env=os.environ.copy(),
+            env=self._safe_environment(),
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=self.command_timeout)
@@ -84,6 +96,6 @@ class WorkspaceTools:
         return [
             {"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
             {"type": "function", "function": {"name": "write_file", "description": "Create or replace a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-            {"type": "function", "function": {"name": "run_command", "description": "Run an allowlisted development command in the workspace.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
+            {"type": "function", "function": {"name": "run_command", "description": "Run an allowlisted development command in the workspace without inheriting secret environment variables.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
             {"type": "function", "function": {"name": "git_diff", "description": "Inspect current git diff.", "parameters": {"type": "object", "properties": {}}}},
         ]
