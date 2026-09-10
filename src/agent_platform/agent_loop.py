@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -19,18 +19,14 @@ ToolFn = Callable[[dict[str, Any]], Awaitable[Any] | Any]
 
 
 class AgentLoop:
-    """Bounded model/tool loop used by workers.
-
-    The loop is intentionally provider-agnostic. The model decides when to call a
-    registered tool; the worker owns the actual filesystem/git/test operations.
-    """
+    """Provider-neutral coding loop with correct tool-call protocol and bounded repair."""
 
     def __init__(self, adapter: ModelAdapter, tools: dict[str, ToolFn], policy: AgentPolicy | None = None):
         self.adapter = adapter
         self.tools = tools
         self.policy = policy or AgentPolicy()
 
-    async def run(self, messages: list[dict[str, str]], tool_specs: list[dict[str, Any]]) -> dict[str, Any]:
+    async def run(self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]]) -> dict[str, Any]:
         started = time.monotonic()
         history = list(messages)
         repairs = 0
@@ -39,9 +35,8 @@ class AgentLoop:
             if time.monotonic() - started >= self.policy.timeout_seconds:
                 return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
             steps += 1
-            response: ModelResponse
             try:
-                response = await self.adapter.generate(history, tools=tool_specs)
+                response: ModelResponse = await self.adapter.generate(history, tools=tool_specs)
             except Exception as exc:
                 if repairs < self.policy.repair_attempts:
                     repairs += 1
@@ -49,30 +44,35 @@ class AgentLoop:
                     continue
                 return {"status": "failed", "steps": steps, "repairs": repairs, "error": str(exc), "messages": history}
 
-            if response.text:
-                history.append({"role": "assistant", "content": response.text})
+            assistant = {"role": "assistant", "content": response.text or None}
+            if response.tool_calls:
+                assistant["tool_calls"] = [
+                    {"id": c.get("id") or f"call_{i}", "type": "function", "function": {
+                        "name": str(c.get("name", "")), "arguments": c.get("arguments", "{}") if isinstance(c.get("arguments", "{}"), str) else json.dumps(c.get("arguments", {}))
+                    }} for i, c in enumerate(response.tool_calls)
+                ]
+            history.append(assistant)
             if not response.tool_calls:
                 return {"status": "completed", "steps": steps, "repairs": repairs, "text": response.text, "usage": response.usage, "messages": history}
 
             for call in response.tool_calls:
+                call_id = str(call.get("id") or "")
                 name = str(call.get("name", ""))
                 args = call.get("arguments", {})
                 if isinstance(args, str):
-                    import json
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {"raw": args}
-                if name not in self.tools:
-                    result = {"error": f"unknown tool: {name}"}
-                else:
-                    try:
-                        value = self.tools[name](args)
-                        result = await value if hasattr(value, "__await__") else value
-                    except Exception as exc:
-                        repairs += 1
-                        result = {"error": str(exc)}
-                history.append({"role": "tool", "name": name, "content": str(result)})
+                try:
+                    if name not in self.tools:
+                        raise ValueError(f"unknown tool: {name}")
+                    value = self.tools[name](args)
+                    result = await value if hasattr(value, "__await__") else value
+                except Exception as exc:
+                    repairs += 1
+                    result = {"error": str(exc)}
+                history.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, ensure_ascii=False, default=str)})
                 if repairs > self.policy.repair_attempts:
                     return {"status": "failed", "steps": steps, "repairs": repairs, "error": "self-repair limit exceeded", "messages": history}
 
