@@ -8,6 +8,8 @@ from .adapters import FailoverAdapter, OpenAICompatibleAdapter
 from .agent_loop import AgentLoop, AgentPolicy
 from .discovery import env_api_key
 from .models import Task
+from .provider_api_catalog import get_api_contract
+from .provider_connections import build_provider_adapter
 from .router import SmartRouter
 from .workspace_tools import WorkspaceTools
 
@@ -32,6 +34,10 @@ def _api_key(endpoint) -> str:
 
 
 def _build_adapter(endpoint, timeout: float):
+    # Verified remote providers must use their explicit API contract. Local or
+    # legacy endpoints (for example Ollama) retain the generic adapter path.
+    if get_api_contract(endpoint.provider) is not None:
+        return build_provider_adapter(endpoint.provider, model=endpoint.model, timeout=timeout, api_key=_api_key(endpoint))
     return OpenAICompatibleAdapter(endpoint.base_url, _api_key(endpoint), endpoint.model, timeout=timeout)
 
 
