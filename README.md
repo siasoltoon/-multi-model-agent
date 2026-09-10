@@ -4,7 +4,7 @@ Provider-agnostic, resumable coding-agent control plane with terminal-first exec
 
 ## Runtime flow
 
-`task → durable state → plan → route → inspect/edit → test → diff/review → repair → verified result`
+`task → durable state → plan → discover models → route → inspect/edit → test → diff/review → repair → verified result`
 
 For remote execution: `terminal → Railway control plane → GitHub Actions → persistent branch → callback → checkpoint/resume → PR`.
 
@@ -22,11 +22,33 @@ The model never gets unrestricted host access. Workers own filesystem and comman
 
 Install production extras with `pip install -e '.[all]'`.
 
-## Provider/model discovery
+## Provider/model discovery and routing
 
-The registry can load operator-declared JSON catalogs from `AGENT_PROVIDER_CATALOGS` and discover local Ollama models from `OLLAMA_BASE_URL/api/tags`. It never harvests, guesses, or stores third-party API keys. One model may have multiple endpoints; routing considers context, tool support, reliability, quota state, latency, and task fit.
+The control plane automatically discovers models from configured provider catalogs when their credentials exist. Built-in OpenAI-compatible catalogs currently cover **OpenRouter, Groq, Cerebras, Together AI, Fireworks AI, and Mistral**, plus local **Ollama** discovery and operator-declared JSON catalogs through `AGENT_PROVIDER_CATALOGS`.
 
-**API keys are not automatically created or obtained.** The operator must provide provider credentials through environment variables or Railway/GitHub Actions secrets. After credentials and endpoints are configured, task execution is automatic and does not require manually selecting a model for every task.
+For every discovered model the registry records provider, model ID, context window, tool capability, billing classification, task-fit metadata and the secret environment-variable name. Secrets themselves are never written to task state or the model catalog.
+
+At runtime, discovered endpoints are registered with the Smart Router. Routing is free/local-first, then considers task fit, reliability, quota, latency, context and tool support. If a provider fails, the agent can fail over to the next ranked endpoint without requiring the user to manually select another model. Failed endpoints are disabled for the current task and put into the router's health/cooldown state for later tasks.
+
+**API keys are not automatically created or obtained.** The operator must provide provider credentials through environment variables or Railway/GitHub Actions secrets. One provider key normally unlocks many models from that provider; you do not need a separate key for every model.
+
+Current built-in provider variables:
+
+- `OPENROUTER_API_KEY`
+- `GROQ_API_KEY`
+- `CEREBRAS_API_KEY`
+- `TOGETHER_API_KEY`
+- `FIREWORKS_API_KEY`
+- `MISTRAL_API_KEY`
+
+Optional runtime controls:
+
+- `AGENT_MAX_PROVIDER_FAILOVERS=3`
+- `AGENT_MODEL_REQUEST_TIMEOUT=180`
+- `OLLAMA_BASE_URL=http://127.0.0.1:11434`
+- `AGENT_PROVIDER_CATALOGS=`
+
+The `/api/providers` endpoint exposes the discovered model inventory, health, billing classification, context and routing telemetry without exposing API keys. `POST /api/providers/discover` refreshes the catalog and `POST /api/providers/health` probes registered endpoints.
 
 ## Token/context saver
 
@@ -65,11 +87,11 @@ Configure the control plane with `AGENT_GITHUB_TOKEN`, `AGENT_GITHUB_WORKER_REPO
 
 The control plane dispatches a task with a stable task ID and persistent branch name. The worker resumes from that branch and, when a bounded run checkpoints, reports its state after the branch is pushed. The control plane automatically dispatches the next attempt up to the task's `max_worker_attempts` metadata value (default 5). Completed work is kept on the agent branch and the worker opens a PR instead of writing directly to the base branch.
 
-Set `AGENT_GITHUB_CALLBACK_TOKEN` in the control plane and the matching `AGENT_CALLBACK_TOKEN` GitHub Actions secret to authenticate worker callbacks. Set `AGENT_BASE_URL`, `AGENT_MODEL`, and `AGENT_API_KEY` as worker repository secrets for the model endpoint.
+Set `AGENT_GITHUB_CALLBACK_TOKEN` in the control plane and the matching `AGENT_CALLBACK_TOKEN` GitHub Actions secret to authenticate worker callbacks. Provider API keys can be supplied to the worker as repository secrets using the same variables listed above; no API key is committed to the repository.
 
 ## Configuration
 
-Important defaults: 32 normal steps, 64 maximum steps, 6 self-repair attempts, 1800s task timeout, and 300s worker lease. Production deployments should use PostgreSQL and may add Redis for multiple workers.
+Important defaults: 32 normal steps, 64 maximum steps, 6 self-repair attempts, 1800s task timeout, 180s model request timeout, 3 provider failover candidates, and 300s worker lease. Production deployments should use PostgreSQL and may add Redis for multiple workers.
 
 ## Verification
 
