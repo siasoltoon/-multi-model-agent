@@ -10,6 +10,16 @@ def test_router_prefers_task_specific_endpoint():
     assert router.choose(tools=True, task_type="coding").id == "coding"
 
 
+def test_router_prefers_role_specialist():
+    router = SmartRouter([
+        ModelEndpoint("general", "p1", "general", task_fit=1.0, reliability=0.95,
+                      metadata={"role_fit": {"coding": 0.6}}),
+        ModelEndpoint("coder", "p2", "coder", task_fit=0.8, reliability=0.95,
+                      metadata={"role_fit": {"coding": 1.0}}),
+    ])
+    assert router.choose(tools=True, task_type="coding", role="coding").id == "coder"
+
+
 def test_router_avoids_rate_limited_endpoint_until_cooldown():
     router = SmartRouter([
         ModelEndpoint("limited", "p1", "m1", reliability=1.0),
