@@ -113,18 +113,25 @@ jobs:
           CALLBACK_TOKEN: ${{ secrets.AGENT_CALLBACK_TOKEN }}
           TASK_ID: ${{ inputs.task_id }}
           RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
           WORKER_ID: github-actions-${{ github.run_id }}
         run: |
           python - <<'PY'
-          import json, os, urllib.request
+          import hashlib, hmac, json, os, time, urllib.request
           path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'workspace', '.agent-result.json')
           if os.path.exists(path):
               with open(path, encoding='utf-8') as f: payload = json.load(f)
           else:
               payload = {'status': 'failed', 'error': 'worker ended before producing a result'}
-          payload.update({'task_id': os.environ['TASK_ID'], 'run_id': os.environ['RUN_ID'], 'worker_id': os.environ['WORKER_ID']})
-          data = json.dumps(payload, ensure_ascii=False, default=str).encode()
-          request = urllib.request.Request(os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/worker-callback', data=data, headers={'Content-Type':'application/json', 'Authorization':'Bearer ' + os.environ.get('CALLBACK_TOKEN','')}, method='POST')
+          payload.update({'task_id': os.environ['TASK_ID'], 'run_id': os.environ['RUN_ID'], 'worker_id': os.environ['WORKER_ID'], 'attempt': int(os.environ['ATTEMPT'])})
+          data = json.dumps(payload, ensure_ascii=False, default=str, separators=(',', ':')).encode()
+          timestamp = str(int(time.time()))
+          secret = os.environ.get('CALLBACK_TOKEN', '')
+          signature = 'sha256=' + hmac.new(secret.encode(), timestamp.encode() + b'.' + data, hashlib.sha256).hexdigest() if secret else ''
+          headers = {'Content-Type': 'application/json'}
+          if secret:
+              headers.update({'X-Agent-Timestamp': timestamp, 'X-Agent-Signature': signature})
+          request = urllib.request.Request(os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/worker-callback', data=data, headers=headers, method='POST')
           try:
               with urllib.request.urlopen(request, timeout=30) as response: print(response.read().decode())
           except Exception as exc: print('callback warning:', exc)
