@@ -1,18 +1,22 @@
-import pytest
-from app.core.models import Health, ModelEndpoint
-from app.core.router import SmartRouter
-from app.core.planner import DAGPlanner
+from agent_platform.dag import DagNode, TaskDag
+from agent_platform.router import ModelEndpoint, SmartRouter
 
 
-def test_router_ignores_unavailable_endpoint():
-    endpoints = [
-        ModelEndpoint("bad", "x", quota_available=False),
-        ModelEndpoint("good", "y", quality=.9, task_fit=.9),
-    ]
-    assert SmartRouter().choose(endpoints).provider == "good"
+def test_dag_rejects_cycle():
+    dag = TaskDag()
+    dag.add(DagNode("a", "architect"))
+    dag.add(DagNode("b", "coder", {"a"}))
+    dag.nodes["a"].dependencies.add("b")
+    try:
+        dag.validate()
+        assert False, "cycle was accepted"
+    except ValueError as exc:
+        assert "cycle" in str(exc).lower()
 
 
-def test_planner_has_dependencies():
-    nodes = DAGPlanner().plan("build a telegram bot")
-    assert [n.id for n in nodes] == ["analyze", "implement", "test", "review"]
-    assert nodes[-1].depends_on == ["test"]
+def test_router_skips_unavailable():
+    router = SmartRouter([
+        ModelEndpoint("bad", "p", "m", health="RATE_LIMITED"),
+        ModelEndpoint("good", "p", "m", health="ONLINE"),
+    ])
+    assert router.choose().id == "good"
