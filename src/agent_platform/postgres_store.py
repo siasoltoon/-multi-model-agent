@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from uuid import UUID
-from .models import Task
+from .models import Task, TaskStatus
 
 
 class PostgresTaskStore:
     """Production PostgreSQL repository. Install the optional postgres extra to use it."""
+    kind = "postgres"
     def __init__(self, dsn: str):
         try:
             import psycopg
@@ -25,23 +26,19 @@ class PostgresTaskStore:
 
     def get(self, task_id: UUID) -> Task | None:
         with self.db.cursor() as cur:
-            cur.execute("SELECT payload::text FROM tasks WHERE id=%s", (str(task_id),))
-            row = cur.fetchone()
+            cur.execute("SELECT payload::text FROM tasks WHERE id=%s", (str(task_id),)); row = cur.fetchone()
         return Task.model_validate_json(row[0]) if row else None
 
     def list(self) -> list[Task]:
         with self.db.cursor() as cur:
-            cur.execute("SELECT payload::text FROM tasks ORDER BY updated_at DESC")
-            rows = cur.fetchall()
+            cur.execute("SELECT payload::text FROM tasks ORDER BY updated_at DESC"); rows = cur.fetchall()
         return [Task.model_validate_json(r[0]) for r in rows]
 
     def checkpoint(self, task_id: UUID, step: int, state: dict) -> Task:
         task = self.get(task_id)
-        if not task:
-            raise KeyError(task_id)
-        task.current_step = step
-        task.checkpoint = state
-        return self.save(task)
+        if not task: raise KeyError(task_id)
+        task.current_step = step; task.checkpoint = state; task.status = TaskStatus.CHECKPOINTED
+        saved = self.save(task); self.event(task.id, "checkpoint", {"step": step, "state": state}); return saved
 
     def event(self, task_id: UUID, event: str, payload: dict) -> None:
         with self.db.cursor() as cur:
@@ -49,6 +46,5 @@ class PostgresTaskStore:
 
     def events(self, task_id: UUID, limit: int = 200) -> list[dict]:
         with self.db.cursor() as cur:
-            cur.execute("SELECT event,payload::text,created_at FROM task_events WHERE task_id=%s ORDER BY id DESC LIMIT %s", (str(task_id), limit))
-            rows = cur.fetchall()
+            cur.execute("SELECT event,payload::text,created_at FROM task_events WHERE task_id=%s ORDER BY id DESC LIMIT %s", (str(task_id), limit)); rows = cur.fetchall()
         return [{"event": e, "payload": json.loads(p), "created_at": str(ts)} for e, p, ts in rows]
