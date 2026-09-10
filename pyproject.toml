@@ -1,7 +1,7 @@
 [project]
 name = "multi-model-agent"
-version = "0.5.0"
-description = "Resumable multi-model coding-agent control plane with durable storage, leases, routing, workers, and terminal-first CLI"
+version = "1.0.0"
+description = "Production-ready resumable multi-model coding-agent control plane with durable recovery, leases, routing, workers, and terminal-first CLI"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
