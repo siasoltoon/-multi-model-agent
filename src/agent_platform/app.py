@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from .config import settings
 from .discovery import ProviderDiscovery
 from .engine import AgentEngine
@@ -71,9 +71,14 @@ def health():
     return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
 
 
-@app.get("/", response_class=HTMLResponse)
-def terminal():
-    return """<!doctype html><meta charset='utf-8'><title>Multi-Model Agent</title><style>body{font-family:system-ui;margin:2rem;max-width:1100px}textarea{width:100%;height:180px}button{padding:.7rem 1rem;margin:.5rem 0}pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem}</style><h1>Multi-Model Agent</h1><p>Web Terminal · provider discovery · automatic worker resume</p><textarea id='p' placeholder='Describe the coding task...'></textarea><br><button onclick='go()'>Create + Run</button> <button onclick='discover()'>Refresh APIs</button><pre id='o'></pre><script>async function go(){let r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p.value})});let t=await r.json();if(r.ok){let d=await fetch('/api/tasks/'+t.id+'/dispatch',{method:'POST'});t=await d.json();watch(t.id||JSON.parse(await (await fetch('/api/tasks/'+t.id)).text()).id)}o.textContent=JSON.stringify(t,null,2)}async function watch(id){let es=new EventSource('/api/tasks/'+id+'/stream');es.addEventListener('task',e=>o.textContent=JSON.stringify(JSON.parse(e.data),null,2));es.onerror=()=>es.close()}async function discover(){let r=await fetch('/api/providers/discover',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}</script>"""
+@app.get("/")
+def root():
+    return JSONResponse({
+        "name": settings.app_name,
+        "interface": "terminal",
+        "message": "Web UI is intentionally disabled. Use the multi-model-agent CLI.",
+        "commands": ["multi-model-agent submit", "multi-model-agent watch", "multi-model-agent status", "multi-model-agent run-local"],
+    })
 
 
 @app.post("/api/providers/discover")
