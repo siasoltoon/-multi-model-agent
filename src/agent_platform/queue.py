@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 
@@ -9,6 +10,7 @@ class RedisTaskQueue:
 
     READY_KEY = "agent:tasks"
     PROCESSING_KEY = "agent:tasks:processing"
+    RECOVERY_LOCK_KEY = "agent:tasks:recovery-lock"
 
     def __init__(self, url: str):
         try:
@@ -26,8 +28,7 @@ class RedisTaskQueue:
 
     def claim_reliable(self, timeout: int = 5) -> str | None:
         """Atomically move a task to processing; call ack() after completion."""
-        item = self.client.brpoplpush(self.READY_KEY, self.PROCESSING_KEY, timeout=max(0, timeout))
-        return item
+        return self.client.brpoplpush(self.READY_KEY, self.PROCESSING_KEY, timeout=max(0, timeout))
 
     def ack(self, task_id: str) -> bool:
         return bool(self.client.lrem(self.PROCESSING_KEY, 1, task_id))
@@ -50,6 +51,22 @@ class RedisTaskQueue:
             pipe.lpush(self.READY_KEY, task_id)
         pipe.execute()
         return items
+
+    def recover_processing_once(self, limit: int = 1000, lock_seconds: int = 60) -> list[str]:
+        """Recover orphaned jobs once across all control-plane instances."""
+        lock_seconds = max(5, min(600, int(lock_seconds)))
+        token = f"{os.getpid()}-{id(self)}"
+        acquired = bool(self.client.set(self.RECOVERY_LOCK_KEY, token, nx=True, ex=lock_seconds))
+        if not acquired:
+            return []
+        try:
+            return self.recover_processing(limit)
+        finally:
+            try:
+                if self.client.get(self.RECOVERY_LOCK_KEY) == token:
+                    self.client.delete(self.RECOVERY_LOCK_KEY)
+            except Exception:
+                pass
 
     def publish_event(self, task_id: str, event: dict[str, Any]) -> None:
         self.client.publish(f"agent:task:{task_id}", json.dumps(event, default=str))
