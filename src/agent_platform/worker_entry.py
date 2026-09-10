@@ -18,8 +18,8 @@ async def main() -> int:
     router = SmartRouter()
     for item in await ProviderDiscovery().discover():
         router.register(ModelEndpoint(
-            id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider,
-            model=item.model, base_url=item.base_url, context_window=item.context_window, tool_support=item.tool_support,
+            id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider, model=item.model,
+            base_url=item.base_url, context_window=item.context_window, tool_support=item.tool_support,
             task_fit=item.task_fit, reliability=item.reliability, latency_ms=item.latency_ms,
             api_key_env=item.api_key_env, metadata=item.metadata,
         ))
@@ -34,6 +34,16 @@ async def main() -> int:
     if task_id:
         from uuid import UUID
         task.id = UUID(task_id)
+    checkpoint = os.getenv("AGENT_CHECKPOINT_JSON", "")
+    if checkpoint:
+        try:
+            decoded = json.loads(checkpoint)
+            if isinstance(decoded, dict):
+                task.checkpoint = decoded
+                task.current_step = int(decoded.get("steps", 0))
+                task.repair_attempts = int(decoded.get("repairs", 0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise SystemExit("AGENT_CHECKPOINT_JSON is invalid")
     result = await run_task(task, router, workspace)
     result_path = os.path.join(workspace, ".agent-result.json")
     with open(result_path, "w", encoding="utf-8") as handle:
