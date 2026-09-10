@@ -28,8 +28,11 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.QUEUED
     max_steps: int = 64
     current_step: int = 0
+    repair_attempts: int = 0
     checkpoint: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
 
 
 class HealthResponse(BaseModel):
