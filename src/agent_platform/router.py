@@ -25,7 +25,7 @@ class ModelEndpoint:
 
 
 class SmartRouter:
-    """Adaptive model router with capability filtering, health cooldowns and scoring."""
+    """Adaptive model router with capability filtering, free-first scoring and cooldowns."""
 
     def __init__(self, endpoints: list[ModelEndpoint] | None = None):
         self.endpoints = endpoints or []
@@ -48,14 +48,7 @@ class SmartRouter:
     def _latency_score(latency_ms: float) -> float:
         return 1.0 / (1.0 + max(latency_ms, 0.0) / 1000.0)
 
-    def choose(
-        self,
-        *,
-        task_fit: float = 1.0,
-        min_context: int = 0,
-        tools: bool = False,
-        task_type: str = "coding",
-    ) -> ModelEndpoint:
+    def _candidates(self, *, min_context: int, tools: bool) -> list[ModelEndpoint]:
         now = monotonic()
         candidates = [
             e for e in self.endpoints
@@ -65,18 +58,28 @@ class SmartRouter:
             and (not tools or e.tool_support)
             and e.quota_remaining > 0
         ]
-        if not candidates:
-            fallback = [
-                e for e in self.endpoints
-                if e.health not in {"OFFLINE", "QUOTA_EXHAUSTED"}
-                and e.context_window >= min_context
-                and (not tools or e.tool_support)
-                and e.quota_remaining > 0
-            ]
-            if fallback:
-                candidates = fallback
-            else:
-                raise RuntimeError("no healthy model endpoint available")
+        if candidates:
+            return candidates
+        fallback = [
+            e for e in self.endpoints
+            if e.health not in {"OFFLINE", "QUOTA_EXHAUSTED"}
+            and e.context_window >= min_context
+            and (not tools or e.tool_support)
+            and e.quota_remaining > 0
+        ]
+        if not fallback:
+            raise RuntimeError("no healthy model endpoint available")
+        return fallback
+
+    def ranked(
+        self,
+        *,
+        task_fit: float = 1.0,
+        min_context: int = 0,
+        tools: bool = False,
+        task_type: str = "coding",
+    ) -> list[ModelEndpoint]:
+        candidates = self._candidates(min_context=min_context, tools=tools)
 
         def score(e: ModelEndpoint) -> float:
             explicit_fit = self._task_multiplier(e, task_type)
@@ -85,9 +88,14 @@ class SmartRouter:
             reliability = max(0.05, min(1.0, e.reliability))
             quota = max(0.05, min(1.0, e.quota_remaining))
             speed = self._latency_score(e.latency_ms)
-            return (fit ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
+            billing = str(e.metadata.get("billing_type", "unknown")).lower() if isinstance(e.metadata, dict) else "unknown"
+            free_bonus = 1.18 if billing in {"free", "local"} else 1.0
+            return free_bonus * (fit ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
 
-        return max(candidates, key=score)
+        return sorted(candidates, key=score, reverse=True)
+
+    def choose(self, **kwargs) -> ModelEndpoint:
+        return self.ranked(**kwargs)[0]
 
     def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False) -> None:
         text = str(error).lower()
