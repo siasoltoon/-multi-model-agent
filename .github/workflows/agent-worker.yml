@@ -48,6 +48,7 @@ jobs:
         env:
           AGENT_TASK_PROMPT: ${{ inputs.task_prompt }}
           AGENT_MAX_STEPS: ${{ inputs.max_steps }}
+          AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
@@ -71,4 +72,4 @@ jobs:
           git add -A
           git commit -m 'agent: apply verified task changes'
           git push --set-upstream origin "$BRANCH"
-          gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" --title 'agent: verified task changes' --body "Automated coding-agent run ${GITHUB_RUN_ID}. Changes were produced only after the worker-side verification loop completed."
+          gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" --title 'agent: verified task changes' --body "Automated coding-agent run ${GITHUB_RUN_ID}. Changes were produced by the bounded worker loop."
