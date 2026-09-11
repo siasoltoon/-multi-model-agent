@@ -78,12 +78,7 @@ class SmartRouter:
 
     @staticmethod
     def _provider_priority(endpoint: ModelEndpoint) -> float:
-        """Use remote free providers by default; local inference is optional.
-
-        This prevents a weak local model from becoming the mandatory first hop.
-        Set AGENT_PREFER_LOCAL=true when the operator explicitly wants Ollama or
-        another local runtime preferred for privacy/offline/latency reasons.
-        """
+        """Use remote free providers by default; local inference is optional."""
         metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
         billing = str(metadata.get("billing_type", "unknown")).lower()
         category = str(metadata.get("category", "")).lower()
@@ -152,6 +147,48 @@ class SmartRouter:
 
     def choose_provider_diverse(self, **kwargs) -> ModelEndpoint:
         return self.ranked_provider_diverse(**kwargs)[0]
+
+    def snapshot_provider_state(self) -> dict:
+        """Serialize health/quota/backoff state so a later worker attempt can resume safely."""
+        now = monotonic()
+        return {
+            "version": 1,
+            "endpoints": {
+                endpoint.id: {
+                    "provider": endpoint.provider,
+                    "health": endpoint.health,
+                    "quota_remaining": endpoint.quota_remaining,
+                    "reliability": endpoint.reliability,
+                    "latency_ms": endpoint.latency_ms,
+                    "failures": endpoint.failures,
+                    "cooldown_remaining": max(0.0, endpoint.cooldown_until - now),
+                }
+                for endpoint in self.endpoints
+            },
+        }
+
+    def restore_provider_state(self, state: dict | None) -> None:
+        """Restore durable provider state without trusting stale endpoint definitions."""
+        if not isinstance(state, dict) or state.get("version") != 1:
+            return
+        raw = state.get("endpoints")
+        if not isinstance(raw, dict):
+            return
+        now = monotonic()
+        for endpoint in self.endpoints:
+            item = raw.get(endpoint.id)
+            if not isinstance(item, dict):
+                continue
+            try:
+                endpoint.quota_remaining = max(0.0, min(1.0, float(item.get("quota_remaining", endpoint.quota_remaining))))
+                endpoint.reliability = max(0.05, min(1.0, float(item.get("reliability", endpoint.reliability))))
+                endpoint.latency_ms = max(0.0, float(item.get("latency_ms", endpoint.latency_ms)))
+                endpoint.failures = max(0, int(item.get("failures", endpoint.failures)))
+                endpoint.health = str(item.get("health", endpoint.health))
+                cooldown = max(0.0, float(item.get("cooldown_remaining", 0.0)))
+                endpoint.cooldown_until = now + cooldown
+            except (TypeError, ValueError):
+                continue
 
     def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False, provider_quota_exhausted: bool = False) -> None:
         text = str(error).lower()
