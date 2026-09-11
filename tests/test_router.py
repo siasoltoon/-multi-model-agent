@@ -1,91 +1,110 @@
+import pytest
+
 from agent_platform.router import ModelEndpoint, SmartRouter
+
+
+def free(provider: str, model: str, **kwargs) -> ModelEndpoint:
+    metadata = {"billing_type": "free", "zero_cost_verified": True, **kwargs.pop("metadata", {})}
+    return ModelEndpoint(provider + "-" + model, provider, model, metadata=metadata, **kwargs)
 
 
 def test_router_prefers_task_specific_endpoint():
     router = SmartRouter([
-        ModelEndpoint("general", "p1", "general", task_fit=0.9, reliability=0.95, latency_ms=500),
-        ModelEndpoint("coding", "p2", "coder", task_fit=0.8, reliability=0.95, latency_ms=500,
-                      metadata={"task_fit": {"coding": 1.0}}),
+        free("p1", "general", task_fit=0.9, reliability=0.95, latency_ms=500),
+        free("p2", "coder", task_fit=0.8, reliability=0.95, latency_ms=500, metadata={"task_fit": {"coding": 1.0}}),
     ])
-    assert router.choose(tools=True, task_type="coding").id == "coding"
+    assert router.choose(tools=True, task_type="coding").model == "coder"
 
 
 def test_router_prefers_role_specialist():
     router = SmartRouter([
-        ModelEndpoint("general", "p1", "general", task_fit=1.0, reliability=0.95,
-                      metadata={"role_fit": {"coding": 0.6}}),
-        ModelEndpoint("coder", "p2", "coder", task_fit=0.8, reliability=0.95,
-                      metadata={"role_fit": {"coding": 1.0}}),
+        free("p1", "general", task_fit=1.0, reliability=0.95, metadata={"role_fit": {"coding": 0.6}}),
+        free("p2", "coder", task_fit=0.8, reliability=0.95, metadata={"role_fit": {"coding": 1.0}}),
     ])
-    assert router.choose(tools=True, task_type="coding", role="coding").id == "coder"
+    assert router.choose(tools=True, task_type="coding", role="coding").model == "coder"
 
 
 def test_router_avoids_rate_limited_endpoint_until_cooldown():
-    router = SmartRouter([
-        ModelEndpoint("limited", "p1", "m1", reliability=1.0),
-        ModelEndpoint("healthy", "p2", "m2", reliability=0.8),
-    ])
-    router.mark_failure("limited", "HTTP 429 Too Many Requests")
-    assert router.choose().id == "healthy"
+    router = SmartRouter([free("p1", "m1", reliability=1.0), free("p2", "m2", reliability=0.8)])
+    router.mark_failure("p1-m1", "HTTP 429 Too Many Requests")
+    assert router.choose().model == "m2"
 
 
 def test_router_rejects_zero_quota():
-    router = SmartRouter([
-        ModelEndpoint("empty", "p1", "m1", quota_remaining=0),
-        ModelEndpoint("ok", "p2", "m2", quota_remaining=1),
-    ])
-    assert router.choose().id == "ok"
+    router = SmartRouter([free("p1", "empty", quota_remaining=0), free("p2", "ok", quota_remaining=1)])
+    assert router.choose().model == "ok"
 
 
 def test_provider_quota_exhaustion_quarantines_all_models_for_that_provider():
     router = SmartRouter([
-        ModelEndpoint("or-a", "openrouter", "model-a", metadata={"billing_type": "free"}),
-        ModelEndpoint("or-b", "openrouter", "model-b", metadata={"billing_type": "free"}),
-        ModelEndpoint("groq", "groq", "model-c", metadata={"billing_type": "paid_or_unknown"}),
+        free("openrouter", "model-a"),
+        free("openrouter", "model-b"),
+        free("groq", "model-c"),
     ])
-    router.mark_failure("or-a", "Rate limit exceeded: free-models-per-day")
+    router.mark_failure("openrouter-model-a", "Rate limit exceeded: free-models-per-day")
     assert router.endpoints[0].health == "QUOTA_EXHAUSTED"
     assert router.endpoints[1].health == "QUOTA_EXHAUSTED"
-    assert router.choose().id == "groq"
+    assert router.choose().id == "groq-model-c"
 
 
-def test_provider_quota_does_not_quarantine_other_providers():
-    router = SmartRouter([
-        ModelEndpoint("or-a", "openrouter", "model-a"),
-        ModelEndpoint("groq", "groq", "model-b"),
-    ])
-    router.mark_failure("or-a", "daily quota exhausted")
+def test_provider_quota_does_not_quarantine_other_free_providers():
+    router = SmartRouter([free("openrouter", "model-a"), free("groq", "model-b")])
+    router.mark_failure("openrouter-model-a", "daily quota exhausted")
     assert router.endpoints[0].health == "QUOTA_EXHAUSTED"
     assert router.endpoints[1].health == "ONLINE"
-    assert router.choose().id == "groq"
+    assert router.choose().id == "groq-model-b"
 
 
-def test_free_provider_is_not_preferred_over_paid_or_unknown():
+def test_paid_and_unknown_endpoints_are_hard_excluded_even_if_better():
     router = SmartRouter([
-        ModelEndpoint("free", "openrouter", "free", reliability=0.95, metadata={"billing_type": "free"}),
-        ModelEndpoint("paid", "groq", "paid", reliability=0.95, metadata={"billing_type": "paid_or_unknown"}),
+        ModelEndpoint("paid", "paid-provider", "premium", reliability=1.0, task_fit=1.0, metadata={"billing_type": "paid"}),
+        ModelEndpoint("unknown", "unknown-provider", "mystery", reliability=1.0, task_fit=1.0, metadata={"billing_type": "unknown"}),
+        free("free-provider", "free-model", reliability=0.5),
     ])
-    assert router.choose().id == "paid"
+    assert router.choose().id == "free-provider-free-model"
+    assert all(SmartRouter.is_zero_cost(endpoint) is False for endpoint in router.endpoints[:2])
+
+
+def test_candidate_free_status_without_verified_zero_cost_is_excluded():
+    router = SmartRouter([
+        ModelEndpoint("candidate", "provider", "candidate", metadata={"billing_type": "free", "free_status": "candidate"}),
+        free("verified", "verified"),
+    ])
+    assert router.choose().id == "verified-verified"
+
+
+def test_local_endpoint_is_always_zero_cost_eligible():
+    router = SmartRouter([
+        ModelEndpoint("local", "ollama", "qwen", metadata={"billing_type": "local", "category": "local"}),
+        ModelEndpoint("paid", "provider", "premium", metadata={"billing_type": "paid"}),
+    ])
+    assert router.choose().id == "local"
+    assert SmartRouter.is_zero_cost(router.endpoints[0])
+
+
+def test_only_paid_or_unknown_endpoints_fail_cleanly():
+    router = SmartRouter([
+        ModelEndpoint("paid", "provider", "premium", metadata={"billing_type": "paid"}),
+        ModelEndpoint("unknown", "provider2", "mystery", metadata={"billing_type": "unknown"}),
+    ])
+    with pytest.raises(RuntimeError, match="zero-cost"):
+        router.choose()
 
 
 def test_provider_diverse_pool_keeps_only_best_endpoint_per_provider():
     router = SmartRouter([
-        ModelEndpoint("or-best", "openrouter", "best", reliability=0.99, metadata={"billing_type": "free"}),
-        ModelEndpoint("or-worse", "openrouter", "worse", reliability=0.60, metadata={"billing_type": "free"}),
-        ModelEndpoint("groq", "groq", "coder", reliability=0.90, metadata={"billing_type": "paid_or_unknown"}),
+        free("openrouter", "best", reliability=0.99),
+        free("openrouter", "worse", reliability=0.60),
+        free("groq", "coder", reliability=0.90),
         ModelEndpoint("local", "ollama", "qwen", reliability=0.85, metadata={"billing_type": "local", "category": "local"}),
     ])
     pool = router.ranked_provider_diverse(task_type="coding", role="coding", max_providers=3)
     assert [item.provider for item in pool] == ["ollama", "groq", "openrouter"]
-    assert [item.id for item in pool] == ["local", "groq", "or-best"]
+    assert [item.id for item in pool] == ["local", "groq-coder", "openrouter-best"]
 
 
 def test_provider_diverse_pool_excludes_quarantined_provider():
-    router = SmartRouter([
-        ModelEndpoint("or-a", "openrouter", "a"),
-        ModelEndpoint("or-b", "openrouter", "b"),
-        ModelEndpoint("groq", "groq", "c"),
-    ])
-    router.mark_failure("or-a", "free-models-per-day quota exhausted")
+    router = SmartRouter([free("openrouter", "a"), free("openrouter", "b"), free("groq", "c")])
+    router.mark_failure("openrouter-a", "free-models-per-day quota exhausted")
     pool = router.ranked_provider_diverse(max_providers=5)
     assert [item.provider for item in pool] == ["groq"]
