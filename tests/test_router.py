@@ -1,5 +1,3 @@
-import pytest
-
 from agent_platform.router import ModelEndpoint, SmartRouter
 
 
