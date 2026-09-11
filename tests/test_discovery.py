@@ -50,6 +50,70 @@ def test_builtin_provider_discovers_models_from_catalog(monkeypatch):
     assert found[0].api_key_env == "DEMO_API_KEY"
 
 
+def test_openrouter_requires_explicit_free_model(monkeypatch):
+    spec = ProviderSpec("openrouter", "https://openrouter.test/api/v1/models", "https://openrouter.test/api/v1", "OPENROUTER_API_KEY")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    monkeypatch.delenv("AGENT_ALLOW_PAID_OPENROUTER", raising=False)
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                json={
+                    "data": [
+                        {"id": "provider/paid-looking", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
+                        {"id": "provider/coder:free", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    discovery = ProviderDiscovery(providers=(spec,))
+    monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
+
+    found = asyncio.run(discovery.discover())
+
+    assert [item.model for item in found] == ["provider/coder:free"]
+    assert found[0].billing_type == "free"
+    assert found[0].metadata["billing_type"] == "free"
+
+
+def test_openrouter_paid_models_can_be_explicitly_enabled(monkeypatch):
+    spec = ProviderSpec("openrouter", "https://openrouter.test/api/v1/models", "https://openrouter.test/api/v1", "OPENROUTER_API_KEY")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    monkeypatch.setenv("AGENT_ALLOW_PAID_OPENROUTER", "true")
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                json={"data": [{"id": "provider/paid-model", "context_length": 65536, "pricing": {"prompt": "0.1", "completion": "0.2"}}]},
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    discovery = ProviderDiscovery(providers=(spec,))
+    monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
+
+    found = asyncio.run(discovery.discover())
+
+    assert [item.model for item in found] == ["provider/paid-model"]
+    assert found[0].billing_type == "paid_or_unknown"
+
+
 def test_provider_without_key_is_not_called(monkeypatch):
     spec = ProviderSpec("demo", "https://demo.test/v1/models", "https://demo.test/v1", "MISSING_API_KEY")
     discovery = ProviderDiscovery(providers=(spec,))
