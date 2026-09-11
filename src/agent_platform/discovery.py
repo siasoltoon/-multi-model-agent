@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .provider_api_catalog import is_api_verified
+from .provider_api_catalog import VERIFIED_PROVIDER_APIS, is_api_verified
 from .provider_registry import PROVIDER_REGISTRY
 
 
@@ -21,24 +21,25 @@ class ProviderSpec:
     auth_scheme: str = "bearer"
 
 
-# Registry entries are catalog metadata. Live discovery is restricted to API
-# contracts explicitly verified in provider_api_catalog.py. A provider no
-# longer needs a second discovery flag: the verified contract is the gate.
+# The verified API contract is the single source of truth for live endpoints.
+# Registry metadata remains the catalog, while contract URLs prevent drift
+# between discovery and actual provider activation.
+_registry_by_id = {item.provider_id: item for item in PROVIDER_REGISTRY}
 BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
     ProviderSpec(
-        item.provider_id,
-        item.models_url or "",
-        item.base_url or "",
-        item.api_key_env or "",
-        item.auth_scheme,
+        contract.provider_id,
+        contract.base_url.rstrip("/") + contract.models_path,
+        contract.base_url,
+        (_registry_by_id[contract.provider_id].api_key_env or ""),
+        contract.auth_scheme,
     )
-    for item in PROVIDER_REGISTRY
+    for contract in VERIFIED_PROVIDER_APIS
     if (
-        item.models_url
-        and item.base_url
-        and item.api_key_env
-        and item.openai_compatible
-        and is_api_verified(item.provider_id)
+        contract.verified
+        and contract.provider_id in _registry_by_id
+        and _registry_by_id[contract.provider_id].api_key_env
+        and _registry_by_id[contract.provider_id].openai_compatible
+        and is_api_verified(contract.provider_id)
     )
 )
 
