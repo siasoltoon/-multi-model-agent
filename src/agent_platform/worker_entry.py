@@ -10,6 +10,16 @@ from .router import ModelEndpoint, SmartRouter
 from .runner import run_task
 
 
+def _allow_paid_openrouter() -> bool:
+    return os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_allowed_endpoint(provider: str, model: str) -> bool:
+    if provider != "openrouter" or _allow_paid_openrouter():
+        return True
+    return model == "openrouter/free" or model.endswith(":free")
+
+
 async def main() -> int:
     workspace = os.getenv("AGENT_WORKSPACE", os.getcwd())
     prompt = os.getenv("AGENT_TASK_PROMPT", "")
@@ -17,6 +27,8 @@ async def main() -> int:
         raise SystemExit("AGENT_TASK_PROMPT is required")
     router = SmartRouter()
     for item in await ProviderDiscovery().discover():
+        if not _is_allowed_endpoint(item.provider, item.model):
+            continue
         router.register(ModelEndpoint(
             id=f"{item.provider}:{item.model}:{item.base_url}", provider=item.provider, model=item.model,
             base_url=item.base_url, context_window=item.context_window, tool_support=item.tool_support,
@@ -26,7 +38,7 @@ async def main() -> int:
         ))
     if not router.endpoints:
         base, model = os.getenv("AGENT_BASE_URL", ""), os.getenv("AGENT_MODEL", "")
-        if base and model:
+        if base and model and _is_allowed_endpoint("openrouter" if "openrouter.ai" in base.lower() else "env", model):
             router.register(ModelEndpoint("env", "env", model, base_url=base, tool_support=True))
     if not router.endpoints:
         raise SystemExit("No model endpoint discovered")
