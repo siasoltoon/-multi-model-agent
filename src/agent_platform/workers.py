@@ -16,8 +16,15 @@ class Worker(BaseModel):
     endpoint: str = ""
     kind: str = "laptop"
     capabilities: list[str] = Field(default_factory=lambda: ["coding", "testing", "tools"])
+    cpu_cores: int | None = None
+    memory_mb: int | None = None
+    gpu: bool = False
+    models: list[str] = Field(default_factory=list)
     status: WorkerStatus = WorkerStatus.ONLINE
     last_heartbeat: datetime | None = None
+
+    def capability_set(self) -> set[str]:
+        return {str(item).strip().lower() for item in self.capabilities if str(item).strip()}
 
 
 class WorkerRegistry:
