@@ -20,8 +20,8 @@ ROLE_TASK_TYPES = {"analysis": "coding", "architecture": "coding", "coding": "co
 ROLE_TOOLING = {"analysis": False, "architecture": False, "coding": True, "testing": True, "review": False, "security": False, "repair": True, "verification": True}
 ROLE_WEIGHTS = {"analysis": 4, "architecture": 6, "coding": 20, "testing": 12, "review": 7, "security": 5, "repair": 8, "verification": 8}
 ROLE_INSTRUCTIONS = {
-    "analysis": "Analyze the request and repository context. Do not edit files. Produce requirements, constraints, risks, and acceptance criteria.",
-    "architecture": "Design the implementation approach from the analysis. Do not edit files. Produce affected areas, interfaces, sequencing, and test strategy.",
+    "analysis": "Analyze the request and repository context. Do not edit files. Inspect safely with read_file/run_command when useful. Produce requirements, constraints, risks, and acceptance criteria.",
+    "architecture": "Design the implementation approach from the analysis. Do not edit files. Inspect safely when useful. Produce affected areas, interfaces, sequencing, and test strategy.",
     "coding": "Implement the planned changes in the workspace. Inspect before editing, make minimal correct changes, and run focused tests.",
     "testing": "Act as the testing specialist. Inspect the implementation, add or improve tests where needed, run relevant tests, and diagnose failures.",
     "review": "Review the resulting implementation as a senior reviewer. Inspect the diff and tests. Identify correctness, maintainability, regression, and integration issues.",
@@ -29,6 +29,7 @@ ROLE_INSTRUCTIONS = {
     "repair": "Act as the repair specialist. Inspect the current workspace, previous findings, failing tests, and diff. Fix every concrete issue you can verify, then rerun relevant tests.",
     "verification": "Perform final verification. Inspect git diff/status and run the most relevant tests/checks. Only report completion when the requested behavior is actually verified.",
 }
+TOOL_GRAMMAR = " Tool commands are direct, non-shell execution: use only allowlisted commands. Safe command strings support && and allowlisted | pipelines. Do not use ;, ||, shell redirection, subshells, backticks, or shell fallbacks; issue a separate tool call instead."
 
 
 def _api_key(endpoint) -> str:
@@ -91,9 +92,20 @@ class PhaseRunner:
         adapter = FailoverAdapter([(e.id, _build_adapter(e, self.request_timeout)) for e in selected], on_failure=lambda endpoint_id, error: self.router.mark_failure(endpoint_id, error))
         return adapter, selected
 
-    def _budget(self, role: str, total: int) -> int:
-        scale = max(0.25, total / 70.0)
-        return max(2, min(24, round(ROLE_WEIGHTS[role] * scale)))
+    def _budgets(self, total: int) -> dict[str, int]:
+        """Allocate the requested global step budget without starving early/final phases."""
+        total = max(len(ROLE_ORDER) * 3, int(total))
+        minimum = 3
+        remaining = total - minimum * len(ROLE_ORDER)
+        weights = [ROLE_WEIGHTS[role] for role in ROLE_ORDER]
+        weight_sum = sum(weights)
+        raw = [remaining * weight / weight_sum for weight in weights]
+        extras = [int(value) for value in raw]
+        remainder = remaining - sum(extras)
+        order = sorted(range(len(ROLE_ORDER)), key=lambda index: raw[index] - extras[index], reverse=True)
+        for index in order[:remainder]:
+            extras[index] += 1
+        return {role: minimum + extras[index] for index, role in enumerate(ROLE_ORDER)}
 
     async def run(self, task: Task) -> dict[str, Any]:
         started = monotonic()
@@ -104,6 +116,7 @@ class PhaseRunner:
         total_steps = int(task.current_step or sum(int(p.get("steps", 0) or 0) for p in phases))
         total_repairs = int(task.repair_attempts or sum(int(p.get("repairs", 0) or 0) for p in phases))
         resume_messages = checkpoint_messages if active_role else []
+        budgets = self._budgets(task.max_steps)
 
         for role in ROLE_ORDER:
             if role in completed_roles and role != active_role:
@@ -115,10 +128,10 @@ class PhaseRunner:
                 messages = resume_messages
             else:
                 messages = [
-                    {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + " Never claim completion without evidence."},
+                    {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + TOOL_GRAMMAR + " Never claim completion without evidence."},
                     {"role": "user", "content": _phase_context(task, role, prior)},
                 ]
-            loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=self._budget(role, task.max_steps), repair_attempts=6, timeout_seconds=self.task_timeout))
+            loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=budgets[role], repair_attempts=6, timeout_seconds=self.task_timeout))
             phase_started = monotonic()
             result = await loop.run(messages, tools.specs())
             elapsed_ms = (monotonic() - phase_started) * 1000.0
