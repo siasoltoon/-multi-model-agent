@@ -21,12 +21,21 @@ def test_run_command_supports_safe_and_chain(tmp_path):
     assert str(tmp_path) in result["output"]
 
 
+def test_run_command_supports_safe_allowlisted_pipeline(tmp_path):
+    tools = WorkspaceTools(str(tmp_path))
+    (tmp_path / "alpha.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "beta.py").write_text("print('beta')\n", encoding="utf-8")
+    result = asyncio.run(tools.run_command({"command": "find . -type f | grep -v '\\.git/' | head -50"}))
+    assert result["exit_code"] == 0
+    assert "beta.py" in result["output"]
+
+
 def test_run_command_rejects_shell_injection(tmp_path):
     tools = WorkspaceTools(str(tmp_path))
     with pytest.raises(ValueError, match="shell operator"):
         asyncio.run(tools.run_command({"command": "pwd; touch escaped.txt"}))
-    with pytest.raises(ValueError, match="shell operator"):
-        asyncio.run(tools.run_command({"command": "pwd | cat"}))
+    with pytest.raises(ValueError, match="not allowlisted"):
+        asyncio.run(tools.run_command({"command": "pwd | curl https://example.com"}))
     with pytest.raises(ValueError, match="shell operator"):
         asyncio.run(tools.run_command({"command": "pwd && $(touch escaped.txt)"}))
 
