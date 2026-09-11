@@ -26,7 +26,7 @@ class ModelEndpoint:
 
 
 class SmartRouter:
-    """Adaptive model router with capability filtering, role-aware scoring and failover."""
+    """Adaptive model router with capability filtering, provider health and failover."""
 
     def __init__(self, endpoints: list[ModelEndpoint] | None = None):
         self.endpoints = endpoints or []
@@ -48,6 +48,24 @@ class SmartRouter:
     @staticmethod
     def _latency_score(latency_ms: float) -> float:
         return 1.0 / (1.0 + max(latency_ms, 0.0) / 1000.0)
+
+    @staticmethod
+    def _provider_priority(endpoint: ModelEndpoint) -> float:
+        metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
+        billing = str(metadata.get("billing_type", "unknown")).lower()
+        category = str(metadata.get("category", "")).lower()
+        # Local is the most deterministic option. Paid/direct providers are
+        # preferred over shared free gateways. Free gateways remain valid as
+        # the final safety net, never as the primary heavy-task route.
+        if billing == "local" or category == "local":
+            return 1.12
+        if billing in {"paid", "paid_or_unknown", "trial"}:
+            return 1.05
+        if category == "direct":
+            return 1.03
+        if billing == "free":
+            return 0.82
+        return 0.96
 
     def _candidates(self, *, min_context: int, tools: bool) -> list[ModelEndpoint]:
         now = monotonic()
@@ -72,6 +90,17 @@ class SmartRouter:
             raise RuntimeError("no healthy model endpoint available")
         return fallback
 
+    def _score(self, e: ModelEndpoint, *, task_fit: float, task_type: str, role: str | None) -> float:
+        explicit_task = self._fit_multiplier(e, "task_fit", task_type)
+        effective_task = e.task_fit if explicit_task is None else explicit_task
+        role_fit = self._fit_multiplier(e, "role_fit", role) if role else None
+        effective_role = 1.0 if role_fit is None else role_fit
+        fit = max(0.05, min(1.0, effective_task * task_fit))
+        reliability = max(0.05, min(1.0, e.reliability))
+        quota = max(0.05, min(1.0, e.quota_remaining))
+        speed = self._latency_score(e.latency_ms)
+        return self._provider_priority(e) * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
+
     def ranked(
         self,
         *,
@@ -82,27 +111,47 @@ class SmartRouter:
         role: str | None = None,
     ) -> list[ModelEndpoint]:
         candidates = self._candidates(min_context=min_context, tools=tools)
+        return sorted(candidates, key=lambda e: self._score(e, task_fit=task_fit, task_type=task_type, role=role), reverse=True)
 
-        def score(e: ModelEndpoint) -> float:
-            explicit_task = self._fit_multiplier(e, "task_fit", task_type)
-            effective_task = e.task_fit if explicit_task is None else explicit_task
-            role_fit = self._fit_multiplier(e, "role_fit", role) if role else None
-            effective_role = 1.0 if role_fit is None else role_fit
-            fit = max(0.05, min(1.0, effective_task * task_fit))
-            reliability = max(0.05, min(1.0, e.reliability))
-            quota = max(0.05, min(1.0, e.quota_remaining))
-            speed = self._latency_score(e.latency_ms)
-            billing = str(e.metadata.get("billing_type", "unknown")).lower() if isinstance(e.metadata, dict) else "unknown"
-            # Free endpoints are for development/testing. Prefer local and
-            # paid-capable endpoints for long-running production tasks so the
-            # router does not burn a tiny shared free-tier quota first.
-            billing_bonus = 1.10 if billing == "local" else (0.82 if billing == "free" else 1.0)
-            return billing_bonus * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
+    def ranked_provider_diverse(
+        self,
+        *,
+        task_fit: float = 1.0,
+        min_context: int = 0,
+        tools: bool = False,
+        task_type: str = "coding",
+        role: str | None = None,
+        max_providers: int | None = None,
+    ) -> list[ModelEndpoint]:
+        """Return the best endpoint from each provider for a true failover pool.
 
-        return sorted(candidates, key=score, reverse=True)
+        A provider/API key is a shared failure and quota domain. Keeping only
+        one endpoint per provider prevents a failed gateway from consuming the
+        entire failover budget through sibling models that share the same key.
+        """
+        ranked = self.ranked(
+            task_fit=task_fit,
+            min_context=min_context,
+            tools=tools,
+            task_type=task_type,
+            role=role,
+        )
+        selected: list[ModelEndpoint] = []
+        seen: set[str] = set()
+        for endpoint in ranked:
+            if endpoint.provider in seen:
+                continue
+            selected.append(endpoint)
+            seen.add(endpoint.provider)
+            if max_providers is not None and len(selected) >= max(1, int(max_providers)):
+                break
+        return selected
 
     def choose(self, **kwargs) -> ModelEndpoint:
         return self.ranked(**kwargs)[0]
+
+    def choose_provider_diverse(self, **kwargs) -> ModelEndpoint:
+        return self.ranked_provider_diverse(**kwargs)[0]
 
     def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False, provider_quota_exhausted: bool = False) -> None:
         text = str(error).lower()
@@ -119,9 +168,6 @@ class SmartRouter:
         failed.last_error_at = monotonic()
         failed.reliability = max(0.05, failed.reliability * 0.85)
         if detected_quota:
-            # A provider/account quota is shared by all models behind the same
-            # provider key. Quarantine every endpoint for that provider instead
-            # of wasting failover attempts on sibling models with the same key.
             cooldown = max(60.0, float(os.getenv("AGENT_PROVIDER_QUOTA_COOLDOWN_SECONDS", "86400")))
             until = monotonic() + cooldown
             for endpoint in self.endpoints:
