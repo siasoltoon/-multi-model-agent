@@ -110,6 +110,7 @@ async def run_worker() -> int:
     heartbeat_seconds = float(os.getenv("AGENT_WORKER_HEARTBEAT_SECONDS", "15"))
     endpoint = os.getenv("AGENT_WORKER_ENDPOINT", "")
     headers = _headers()
+    max_concurrent_tasks = _optional_int("AGENT_WORKER_MAX_CONCURRENT_TASKS") or 1
 
     async with httpx.AsyncClient(timeout=30) as client:
         router = await _router()
@@ -128,6 +129,7 @@ async def run_worker() -> int:
                 "memory_mb": _optional_int("AGENT_WORKER_MEMORY_MB"),
                 "gpu": _gpu_available(),
                 "models": _models(),
+                "max_concurrent_tasks": max_concurrent_tasks,
             },
         )
         response.raise_for_status()
