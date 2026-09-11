@@ -15,8 +15,9 @@ def test_dag_rejects_cycle():
 
 
 def test_router_skips_unavailable():
+    verified_free = {"billing_type": "free", "zero_cost_verified": True}
     router = SmartRouter([
-        ModelEndpoint("bad", "p", "m", health="RATE_LIMITED"),
-        ModelEndpoint("good", "p", "m", health="ONLINE"),
+        ModelEndpoint("bad", "p", "m", health="RATE_LIMITED", metadata=verified_free),
+        ModelEndpoint("good", "p", "m", health="ONLINE", metadata=verified_free),
     ])
     assert router.choose().id == "good"
