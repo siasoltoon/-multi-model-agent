@@ -41,4 +41,7 @@ async def run_task(task: Task, router: SmartRouter, workspace: str) -> dict:
             "steps": task.current_step,
             "repairs": task.repair_attempts,
         }
+    elif result.get("status") in {"completed", "failed"}:
+        task.checkpoint = {}
+
     return result
