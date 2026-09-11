@@ -14,11 +14,7 @@ class PhaseNode:
 
 
 class PhaseGraph:
-    """Dependency-aware execution graph for resumable coding tasks.
-
-    The graph deliberately stays deterministic: model selection/failover belongs to
-    the router, while this layer owns phase ordering, dependencies, and repair loops.
-    """
+    """Dependency-aware execution graph for resumable coding tasks."""
 
     def __init__(self, nodes: Iterable[PhaseNode]):
         self.nodes = tuple(nodes)
@@ -61,7 +57,6 @@ class PhaseGraph:
             raise ValueError(f"unknown phase role: {role}") from exc
 
     def ready(self, completed: set[str], *, active: str | None = None) -> list[str]:
-        """Return deterministic phases whose dependencies are satisfied."""
         return [
             node.role
             for node in self.nodes
@@ -71,13 +66,13 @@ class PhaseGraph:
         ]
 
     def next_after(self, role: str, completed: set[str]) -> str | None:
-        """Return the next executable phase after a successful phase."""
         if role not in self._by_role:
             raise ValueError(f"unknown phase role: {role}")
+        effective_completed = set(completed) | {role}
         for candidate in self.nodes:
-            if candidate.role in completed or candidate.role == role:
+            if candidate.role in effective_completed:
                 continue
-            if all(dependency in completed or dependency == role for dependency in candidate.depends_on):
+            if all(dependency in effective_completed for dependency in candidate.depends_on):
                 return candidate.role
         return None
 
@@ -94,6 +89,6 @@ DEFAULT_PHASE_GRAPH = PhaseGraph(
         PhaseNode("review", ("testing",)),
         PhaseNode("security", ("review",)),
         PhaseNode("repair", ("security",), retry_target="coding"),
-        PhaseNode("verification", ("repair",)),
+        PhaseNode("verification", ("repair",), retry_target="repair"),
     )
 )
