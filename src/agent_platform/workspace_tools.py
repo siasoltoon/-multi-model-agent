@@ -56,7 +56,12 @@ class WorkspaceTools:
     @classmethod
     def _split_chain(cls, command: Any) -> list[list[str]]:
         """Parse a small safe command language supporting only `&&` chains."""
-        raw = " ".join(str(x) for x in command) if isinstance(command, list) else str(command or "")
+        if isinstance(command, list):
+            argv = [str(x) for x in command]
+            if not argv:
+                raise ValueError("empty command")
+            return [argv]
+        raw = str(command or "")
         if not raw.strip():
             raise ValueError("empty command")
         sanitized = raw.replace("&&", "")
@@ -79,6 +84,14 @@ class WorkspaceTools:
             if any(arg in cls.BLOCKED_ARGS for arg in argv[1:]):
                 raise ValueError("command contains a blocked package-management option")
         return chain
+
+    @classmethod
+    def _argv(cls, command: Any) -> list[str]:
+        """Backward-compatible validation helper for a single command."""
+        chain = cls._argv_chain(command)
+        if len(chain) != 1:
+            raise ValueError("command chain is not valid for single-command validation")
+        return chain[0]
 
     @classmethod
     def _safe_environment(cls) -> dict[str, str]:
