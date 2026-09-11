@@ -12,9 +12,10 @@ class WorkspaceTools:
     """Bounded workspace tools for an execution worker."""
 
     ALLOWED_COMMANDS = {
-        "python", "pytest", "pip", "npm", "node", "git", "uv", "ruff",
+        "python", "python3", "python3.10", "python3.11", "python3.12", "python3.13",
+        "pytest", "pip", "pip3", "npm", "node", "git", "uv", "ruff",
         "pwd", "ls", "find", "cat", "head", "tail", "grep", "rg", "sed",
-        "awk", "wc", "sort", "diff", "file",
+        "awk", "wc", "sort", "diff", "file", "echo", "printf",
     }
     BLOCKED_ARGS = {"--system", "--global", "--user", "--break-system-packages"}
     SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY", "AUTH")
@@ -66,7 +67,7 @@ class WorkspaceTools:
         if not raw.strip():
             raise ValueError("empty command")
         if any(operator in raw for operator in cls.SHELL_OPERATORS):
-            raise ValueError("command contains a shell operator")
+            raise ValueError("command contains a blocked shell operator; use separate tool calls")
         raw = re.sub(r"\s*\|\s*", "|", raw)
         groups: list[list[list[str]]] = []
         for group_text in raw.split("&&"):
@@ -93,8 +94,10 @@ class WorkspaceTools:
         groups = cls._split_chain(command)
         for pipeline in groups:
             for argv in pipeline:
-                if not argv or Path(argv[0]).name.lower() not in cls.ALLOWED_COMMANDS:
-                    raise ValueError("command is not allowlisted")
+                command_name = Path(argv[0]).name.lower() if argv else ""
+                if command_name not in cls.ALLOWED_COMMANDS:
+                    allowed = ", ".join(sorted(cls.ALLOWED_COMMANDS))
+                    raise ValueError(f"command '{command_name}' is not allowlisted; allowed commands: {allowed}")
                 if any(arg in cls.BLOCKED_ARGS for arg in argv[1:]):
                     raise ValueError("command contains a blocked package-management option")
         return groups
@@ -199,8 +202,8 @@ class WorkspaceTools:
     @staticmethod
     def specs() -> list[dict[str, Any]]:
         return [
-            {"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-            {"type": "function", "function": {"name": "write_file", "description": "Create or replace a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-            {"type": "function", "function": {"name": "run_command", "description": "Run safe allowlisted development commands in the workspace. Supports && chains and allowlisted pipelines, never a shell.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
+            {"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file inside the workspace. Paths must stay inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+            {"type": "function", "function": {"name": "write_file", "description": "Create or replace a UTF-8 text file inside the workspace. Paths must stay inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+            {"type": "function", "function": {"name": "run_command", "description": "Run direct non-shell development commands. Allowed: python/python3, pytest, pip/pip3, npm, node, git, uv, ruff, pwd, ls, find, cat, head, tail, grep, rg, sed, awk, wc, sort, diff, file, echo, printf. Supports && and allowlisted | pipelines. Never use ;, ||, redirects, subshells, backticks, or shell fallback syntax.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
             {"type": "function", "function": {"name": "git_diff", "description": "Inspect current git diff.", "parameters": {"type": "object", "properties": {}}}},
         ]
