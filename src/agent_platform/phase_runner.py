@@ -74,7 +74,7 @@ def _checkpoint_phases(task: Task) -> tuple[list[dict[str, Any]], str | None, li
 
 
 class PhaseRunner:
-    """Execute the role pipeline with provider failover and resumable role checkpoints."""
+    """Execute the role pipeline with provider-diverse failover and resumable checkpoints."""
 
     def __init__(self, router: SmartRouter, workspace: str, *, on_phase: Callable[[dict[str, Any]], None] | None = None):
         self.router = router
@@ -85,27 +85,19 @@ class PhaseRunner:
         self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "5")))
 
     def _adapter(self, role: str):
-        ranked = self.router.ranked(min_context=4096, tools=ROLE_TOOLING[role], task_type=ROLE_TASK_TYPES[role], role=role)
-        # A provider/API key is one quota and one failure domain. Never spend
-        # failover attempts on multiple models from the same provider.
-        selected = []
-        seen_providers: set[str] = set()
-        for endpoint in ranked:
-            if endpoint.provider in seen_providers:
-                continue
-            selected.append(endpoint)
-            seen_providers.add(endpoint.provider)
-            if len(selected) >= self.max_failover:
-                break
+        selected = self.router.ranked_provider_diverse(
+            min_context=4096,
+            tools=ROLE_TOOLING[role],
+            task_type=ROLE_TASK_TYPES[role],
+            role=role,
+            max_providers=self.max_failover,
+        )
         if not selected:
             raise RuntimeError(f"no model endpoint available for role: {role}")
 
         def on_failure(endpoint_id, error):
             quota_exhausted = is_provider_quota_exhausted(error)
             self.router.mark_failure(endpoint_id, error, provider_quota_exhausted=quota_exhausted)
-            # Do not try sibling models from the same account/provider after a
-            # provider-wide quota error. The next selected endpoint must be a
-            # genuinely different provider/key.
             return quota_exhausted
 
         adapter = FailoverAdapter(
@@ -116,7 +108,6 @@ class PhaseRunner:
         return adapter, selected
 
     def _budgets(self, total: int) -> dict[str, int]:
-        """Allocate the global budget so a 32-step run can actually reach coding and verification."""
         total = max(32, int(total))
         if total == 32:
             values = {"analysis": 4, "architecture": 3, "coding": 9, "testing": 5, "review": 2, "security": 1, "repair": 2, "verification": 6}
@@ -138,9 +129,6 @@ class PhaseRunner:
 
     def _next_role(self, role: str) -> str:
         index = ROLE_ORDER.index(role)
-        # A budget-exhausted final verification starts a repair/verification
-        # continuation cycle on the next worker attempt instead of replaying
-        # verification forever.
         return ROLE_ORDER[index + 1] if index + 1 < len(ROLE_ORDER) else "repair"
 
     async def run(self, task: Task) -> dict[str, Any]:
@@ -192,9 +180,8 @@ class PhaseRunner:
             if result.get("status") == "checkpointed":
                 reason = str(result.get("checkpoint_reason") or "timeout")
                 if reason == "step_budget":
-                    next_role = self._next_role(role)
                     return {
-                        "status": "checkpointed", "active_role": next_role, "checkpoint_reason": "phase_budget_exhausted",
+                        "status": "checkpointed", "active_role": self._next_role(role), "checkpoint_reason": "phase_budget_exhausted",
                         "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": [],
                     }
                 return {
