@@ -83,6 +83,7 @@ jobs:
           AGENT_CHECKPOINT_JSON: ${{ inputs.checkpoint_json }}
           AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
+          AGENT_MODEL_MAX_TOKENS: '1024'
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
@@ -105,7 +106,6 @@ jobs:
           status = str(data.get('status', 'failed'))
           if status not in {'completed', 'checkpointed'}:
               status = 'failed'
-          Path('worker-status.txt').write_text(status, encoding='utf-8')
           print(f'worker status: {status}')
           with open(__import__('os').environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f'status={status}\n')
@@ -120,7 +120,8 @@ jobs:
           git config user.name 'multi-model-agent[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git reset -- .agent-result.json worker-status.txt 2>/dev/null || true
+          git reset -- .agent-result.json 2>/dev/null || true
+          rm -f worker-status.txt
           if [ -z "$(git status --porcelain)" ]; then exit 0; fi
           git commit -m 'agent: apply verified task progress'
           git push --set-upstream origin "$WORKING_BRANCH"
