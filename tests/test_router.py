@@ -1,3 +1,5 @@
+import pytest
+
 from agent_platform.router import ModelEndpoint, SmartRouter
 
 
@@ -35,3 +37,34 @@ def test_router_rejects_zero_quota():
         ModelEndpoint("ok", "p2", "m2", quota_remaining=1),
     ])
     assert router.choose().id == "ok"
+
+
+def test_provider_quota_exhaustion_quarantines_all_models_for_that_provider():
+    router = SmartRouter([
+        ModelEndpoint("or-a", "openrouter", "model-a", metadata={"billing_type": "free"}),
+        ModelEndpoint("or-b", "openrouter", "model-b", metadata={"billing_type": "free"}),
+        ModelEndpoint("groq", "groq", "model-c", metadata={"billing_type": "paid_or_unknown"}),
+    ])
+    router.mark_failure("or-a", "Rate limit exceeded: free-models-per-day")
+    assert router.endpoints[0].health == "QUOTA_EXHAUSTED"
+    assert router.endpoints[1].health == "QUOTA_EXHAUSTED"
+    assert router.choose().id == "groq"
+
+
+def test_provider_quota_does_not_quarantine_other_providers():
+    router = SmartRouter([
+        ModelEndpoint("or-a", "openrouter", "model-a"),
+        ModelEndpoint("groq", "groq", "model-b"),
+    ])
+    router.mark_failure("or-a", "daily quota exhausted")
+    assert router.endpoints[0].health == "QUOTA_EXHAUSTED"
+    assert router.endpoints[1].health == "ONLINE"
+    assert router.choose().id == "groq"
+
+
+def test_free_provider_is_not_preferred_over_paid_or_unknown():
+    router = SmartRouter([
+        ModelEndpoint("free", "openrouter", "free", reliability=0.95, metadata={"billing_type": "free"}),
+        ModelEndpoint("paid", "groq", "paid", reliability=0.95, metadata={"billing_type": "paid_or_unknown"}),
+    ])
+    assert router.choose().id == "paid"
