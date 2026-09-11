@@ -8,7 +8,6 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-COPY config ./config
 
 RUN pip install --upgrade pip && pip install '.[all]'
 
