@@ -79,23 +79,23 @@ class WorkerOrchestrator:
         return True, score, matched
 
     def _reconcile_runtime_load(self) -> None:
-        """Synchronize worker capacity from the control plane's durable tasks.
+        """Recover runtime counters from durable RUNNING tasks after restart.
 
-        The registry is intentionally in-memory, so after a process restart its
-        counters can be empty while PostgreSQL/SQLite still has RUNNING tasks.
-        When the app module is already loaded, reconcile from its store before
-        every scheduling decision. Tests and standalone orchestrator users do
-        not need to import the control plane.
+        Normal live claims are already tracked by WorkerRegistry. Reconciliation
+        is only needed when the registry has no runtime load yet; this prevents a
+        test/active process claim from being erased by an empty store snapshot.
         """
+        if any(worker.active_tasks for worker in self.registry.workers.values()):
+            return
         app_module = sys.modules.get("agent_platform.app")
         store = getattr(app_module, "store", None) if app_module else None
         if store is None:
             return
         try:
-            self.registry.reconcile_active_tasks(store.list())
+            tasks = store.list()
+            if any(getattr(getattr(task, "status", None), "value", getattr(task, "status", None)) == "running" for task in tasks):
+                self.registry.reconcile_active_tasks(tasks)
         except Exception:
-            # Scheduling must remain available if a telemetry reconciliation
-            # read temporarily fails; the durable lease still protects claims.
             return
 
     def candidates(self, requirements: Mapping[str, Any] | None = None) -> list[WorkerCandidate]:
