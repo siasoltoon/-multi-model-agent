@@ -67,7 +67,6 @@ class WorkspaceTools:
             raise ValueError("empty command")
         if any(operator in raw for operator in cls.SHELL_OPERATORS):
             raise ValueError("command contains a shell operator")
-        # Pipelines are executed with direct subprocess pipes, never a shell.
         raw = re.sub(r"\s*\|\s*", "|", raw)
         groups: list[list[list[str]]] = []
         for group_text in raw.split("&&"):
@@ -119,19 +118,37 @@ class WorkspaceTools:
 
     async def _run_pipeline(self, pipeline: list[list[str]]) -> tuple[int, str]:
         processes: list[asyncio.subprocess.Process] = []
-        previous_stdout = None
+        previous_read_fd: int | None = None
+        open_fds: set[int] = set()
         try:
-            for argv in pipeline:
+            for index, argv in enumerate(pipeline):
+                is_last = index == len(pipeline) - 1
+                next_read_fd: int | None = None
+                next_write_fd: int | None = None
+                if not is_last:
+                    next_read_fd, next_write_fd = os.pipe()
+                    open_fds.update({next_read_fd, next_write_fd})
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
                     cwd=self.root,
-                    stdin=previous_stdout if previous_stdout is not None else asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
+                    stdin=previous_read_fd if previous_read_fd is not None else asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE if is_last else next_write_fd,
                     stderr=asyncio.subprocess.STDOUT,
                     env=self._safe_environment(),
                 )
                 processes.append(proc)
-                previous_stdout = proc.stdout
+                if previous_read_fd is not None:
+                    os.close(previous_read_fd)
+                    open_fds.discard(previous_read_fd)
+                    previous_read_fd = None
+                if next_write_fd is not None:
+                    os.close(next_write_fd)
+                    open_fds.discard(next_write_fd)
+                previous_read_fd = next_read_fd
+            if previous_read_fd is not None:
+                os.close(previous_read_fd)
+                open_fds.discard(previous_read_fd)
+                previous_read_fd = None
             last = processes[-1]
             try:
                 out, _ = await asyncio.wait_for(last.communicate(), timeout=self.command_timeout)
@@ -149,6 +166,13 @@ class WorkspaceTools:
             code = next((item for item in reversed(codes) if item != 0), 0)
             return int(code), out.decode("utf-8", errors="replace")
         finally:
+            if previous_read_fd is not None:
+                open_fds.add(previous_read_fd)
+            for fd in list(open_fds):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             for proc in processes:
                 if proc.returncode is None:
                     proc.kill()
