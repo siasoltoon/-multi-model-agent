@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .adapters import ModelAdapter, ModelResponse
+from .adapters import ModelAdapter, ModelResponse, ProviderFailoverExhausted
 from .context_saver import ContextSaver
 
 
@@ -39,6 +39,19 @@ class AgentLoop:
             model_history = self.context_saver.compact(history)
             try:
                 response: ModelResponse = await self.adapter.generate(model_history, tools=tool_specs)
+            except ProviderFailoverExhausted as exc:
+                # Provider outages are routing failures, not agent defects. They
+                # must never consume the six self-repair attempts.
+                history.append({"role": "system", "content": f"Provider failover exhausted. Error: {exc}"})
+                return {
+                    "status": "failed",
+                    "steps": steps,
+                    "repairs": repairs,
+                    "error": str(exc),
+                    "provider_failover_exhausted": True,
+                    "failed_endpoints": list(exc.endpoint_ids),
+                    "messages": history,
+                }
             except Exception as exc:
                 # Provider/model retries are recovery attempts, not productive
                 # agent steps. Do not let a transient gateway failure consume a
