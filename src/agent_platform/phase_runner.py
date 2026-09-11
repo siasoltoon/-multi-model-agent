@@ -93,8 +93,17 @@ class PhaseRunner:
         return adapter, selected
 
     def _budgets(self, total: int) -> dict[str, int]:
-        """Allocate the requested global step budget without starving early/final phases."""
-        total = max(len(ROLE_ORDER) * 3, int(total))
+        """Allocate the global budget so a 32-step run can actually reach coding and verification."""
+        total = max(32, int(total))
+        if total == 32:
+            # Eight roles cannot all receive a meaningful budget at this size.
+            # Keep every role present, but protect the phases that must inspect,
+            # implement, test, and verify instead of starving analysis at 3 calls.
+            values = {"analysis": 4, "architecture": 3, "coding": 9, "testing": 5, "review": 2, "security": 1, "repair": 2, "verification": 6}
+            if sum(values.values()) != 32:
+                raise AssertionError("invalid 32-step role budget")
+            return values
+
         minimum = 3
         remaining = total - minimum * len(ROLE_ORDER)
         weights = [ROLE_WEIGHTS[role] for role in ROLE_ORDER]
