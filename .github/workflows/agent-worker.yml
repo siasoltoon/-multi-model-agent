@@ -67,16 +67,21 @@ jobs:
           CHECKPOINT_JSON: ${{ inputs.checkpoint_json }}
         run: |
           git fetch origin --prune
-          if git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
-            git checkout -B "$WORKING_BRANCH" "origin/$WORKING_BRANCH"
-            # A task with no checkpoint is a fresh execution. Never execute a
-            # stale worker branch that may contain an older agent implementation;
-            # start it from the requested base branch instead. Checkpointed
-            # executions intentionally keep the persistent branch unchanged.
-            if [ -z "${CHECKPOINT_JSON//[[:space:]]/}" ]; then
-              git reset --hard "origin/$BASE_BRANCH"
+          if [ -z "${CHECKPOINT_JSON//[[:space:]]/}" ]; then
+            # A fresh task always starts from the requested base. If a stale
+            # persistent branch already exists, replace it atomically with the
+            # base commit so the next agent never inherits old task changes.
+            git checkout -B "$WORKING_BRANCH" "origin/$BASE_BRANCH"
+            if git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
+              git push --force-with-lease origin "HEAD:$WORKING_BRANCH"
+            else
+              git push --set-upstream origin "$WORKING_BRANCH"
             fi
+          elif git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
+            # A checkpointed execution resumes the exact persistent branch.
+            git checkout -B "$WORKING_BRANCH" "origin/$WORKING_BRANCH"
           else
+            # A checkpoint without an existing branch is recoverable from base.
             git checkout -B "$WORKING_BRANCH" "origin/$BASE_BRANCH"
           fi
       - name: Install agent
@@ -183,10 +188,6 @@ jobs:
           try:
               callback_task_id = str(UUID(external_task_id))
           except ValueError:
-              # Control-plane routes use UUID task identifiers. Manual/E2E
-              # workflows may use human-readable IDs, so derive the same stable
-              # UUID used by worker_entry.py while retaining the original ID in
-              # the callback payload for external correlation.
               callback_task_id = str(uuid5(NAMESPACE_URL, f'multi-model-agent:task:{external_task_id}'))
 
           payload.update({
