@@ -26,7 +26,7 @@ class ModelEndpoint:
 
 
 class SmartRouter:
-    """Adaptive model router with capability filtering, provider health and failover."""
+    """Adaptive router with capability filtering, zero-cost enforcement and failover."""
 
     def __init__(self, endpoints: list[ModelEndpoint] | None = None):
         self.endpoints = endpoints or []
@@ -34,6 +34,38 @@ class SmartRouter:
     def register(self, endpoint: ModelEndpoint) -> None:
         self.endpoints = [x for x in self.endpoints if x.id != endpoint.id]
         self.endpoints.append(endpoint)
+
+    @staticmethod
+    def is_zero_cost(endpoint: ModelEndpoint) -> bool:
+        """Return True only when the endpoint is explicitly proven cost-free.
+
+        This is intentionally a hard safety gate, not a ranking preference.
+        Unknown, trial, paid, and merely "candidate free" providers are never
+        eligible. Local runtimes are always zero-cost at the inference layer.
+        """
+        metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
+        billing = str(metadata.get("billing_type", "unknown")).strip().lower()
+        category = str(metadata.get("category", "")).strip().lower()
+        free_status = str(metadata.get("free_status", "unknown")).strip().lower()
+        zero_cost_verified = metadata.get("zero_cost_verified") is True
+
+        if billing == "local" or category == "local":
+            return True
+        if billing not in {"free", "permanent_free"}:
+            return False
+        if zero_cost_verified or free_status == "verified":
+            return True
+
+        pricing = metadata.get("pricing")
+        if isinstance(pricing, dict):
+            values = [pricing.get(k) for k in ("prompt", "completion", "input", "output")]
+            present = [v for v in values if v is not None]
+            if present:
+                try:
+                    return all(float(v) == 0 for v in present)
+                except (TypeError, ValueError):
+                    return False
+        return False
 
     @staticmethod
     def _fit_multiplier(endpoint: ModelEndpoint, key: str, value: str) -> float | None:
@@ -54,24 +86,18 @@ class SmartRouter:
         metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
         billing = str(metadata.get("billing_type", "unknown")).lower()
         category = str(metadata.get("category", "")).lower()
-        # Local is the most deterministic option. Paid/direct providers are
-        # preferred over shared free gateways. Free gateways remain valid as
-        # the final safety net, never as the primary heavy-task route.
         if billing == "local" or category == "local":
             return 1.12
-        if billing in {"paid", "paid_or_unknown", "trial"}:
-            return 1.05
-        if category == "direct":
-            return 1.03
-        if billing == "free":
-            return 0.82
-        return 0.96
+        if billing in {"free", "permanent_free"}:
+            return 0.95
+        return 0.0
 
     def _candidates(self, *, min_context: int, tools: bool) -> list[ModelEndpoint]:
         now = monotonic()
         candidates = [
             e for e in self.endpoints
-            if e.health not in {"OFFLINE", "RATE_LIMITED", "QUOTA_EXHAUSTED"}
+            if self.is_zero_cost(e)
+            and e.health not in {"OFFLINE", "RATE_LIMITED", "QUOTA_EXHAUSTED"}
             and e.cooldown_until <= now
             and e.context_window >= min_context
             and (not tools or e.tool_support)
@@ -81,13 +107,14 @@ class SmartRouter:
             return candidates
         fallback = [
             e for e in self.endpoints
-            if e.health not in {"OFFLINE", "QUOTA_EXHAUSTED"}
+            if self.is_zero_cost(e)
+            and e.health not in {"OFFLINE", "QUOTA_EXHAUSTED"}
             and e.context_window >= min_context
             and (not tools or e.tool_support)
             and e.quota_remaining > 0
         ]
         if not fallback:
-            raise RuntimeError("no healthy model endpoint available")
+            raise RuntimeError("no healthy zero-cost model endpoint available")
         return fallback
 
     def _score(self, e: ModelEndpoint, *, task_fit: float, task_type: str, role: str | None) -> float:
@@ -101,41 +128,13 @@ class SmartRouter:
         speed = self._latency_score(e.latency_ms)
         return self._provider_priority(e) * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
 
-    def ranked(
-        self,
-        *,
-        task_fit: float = 1.0,
-        min_context: int = 0,
-        tools: bool = False,
-        task_type: str = "coding",
-        role: str | None = None,
-    ) -> list[ModelEndpoint]:
+    def ranked(self, *, task_fit: float = 1.0, min_context: int = 0, tools: bool = False, task_type: str = "coding", role: str | None = None) -> list[ModelEndpoint]:
         candidates = self._candidates(min_context=min_context, tools=tools)
         return sorted(candidates, key=lambda e: self._score(e, task_fit=task_fit, task_type=task_type, role=role), reverse=True)
 
-    def ranked_provider_diverse(
-        self,
-        *,
-        task_fit: float = 1.0,
-        min_context: int = 0,
-        tools: bool = False,
-        task_type: str = "coding",
-        role: str | None = None,
-        max_providers: int | None = None,
-    ) -> list[ModelEndpoint]:
-        """Return the best endpoint from each provider for a true failover pool.
-
-        A provider/API key is a shared failure and quota domain. Keeping only
-        one endpoint per provider prevents a failed gateway from consuming the
-        entire failover budget through sibling models that share the same key.
-        """
-        ranked = self.ranked(
-            task_fit=task_fit,
-            min_context=min_context,
-            tools=tools,
-            task_type=task_type,
-            role=role,
-        )
+    def ranked_provider_diverse(self, *, task_fit: float = 1.0, min_context: int = 0, tools: bool = False, task_type: str = "coding", role: str | None = None, max_providers: int | None = None) -> list[ModelEndpoint]:
+        """Return the best zero-cost endpoint from each provider for failover."""
+        ranked = self.ranked(task_fit=task_fit, min_context=min_context, tools=tools, task_type=task_type, role=role)
         selected: list[ModelEndpoint] = []
         seen: set[str] = set()
         for endpoint in ranked:
@@ -155,12 +154,8 @@ class SmartRouter:
 
     def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False, provider_quota_exhausted: bool = False) -> None:
         text = str(error).lower()
-        detected_quota = provider_quota_exhausted or any(
-            marker in text for marker in ("free-models-per-day", "daily quota", "daily limit", "quota exhausted", "quota_exceeded", "insufficient_quota", "billing limit")
-        )
-        detected_rate_limit = rate_limited or any(
-            marker in text for marker in ("429", "rate limit", "rate_limit", "too many requests", "quota")
-        )
+        detected_quota = provider_quota_exhausted or any(marker in text for marker in ("free-models-per-day", "daily quota", "daily limit", "quota exhausted", "quota_exceeded", "insufficient_quota", "billing limit"))
+        detected_rate_limit = rate_limited or any(marker in text for marker in ("429", "rate limit", "rate_limit", "too many requests", "quota"))
         failed = next((e for e in self.endpoints if e.id == endpoint_id), None)
         if failed is None:
             return
