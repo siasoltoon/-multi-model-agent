@@ -46,6 +46,13 @@ class PostgresTaskStore:
             self._ensure_schema()
             return operation()
 
+    def ping(self) -> bool:
+        def op():
+            with self.db.cursor() as cur:
+                cur.execute("SELECT 1")
+                return cur.fetchone() == (1,)
+        return bool(self._retry(op))
+
     def save(self, task: Task) -> Task:
         def op():
             with self.db.cursor() as cur:
