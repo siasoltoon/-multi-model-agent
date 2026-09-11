@@ -1,6 +1,6 @@
 import asyncio
 
-from agent_platform.adapters import ModelResponse
+from agent_platform.adapters import FailoverAdapter, ModelResponse
 from agent_platform.agent_loop import AgentLoop, AgentPolicy
 from agent_platform.workspace_tools import WorkspaceTools
 
@@ -60,6 +60,25 @@ def test_agent_loop_retries_provider_failure_without_consuming_step_budget(tmp_p
     assert result["steps"] == 1
     assert result["repairs"] == 1
     assert adapter.calls == 2
+
+
+def test_agent_loop_does_not_spend_repair_attempts_on_provider_exhaustion(tmp_path):
+    class AlwaysFail:
+        async def generate(self, messages, *, tools=None):
+            raise RuntimeError("Provider returned error")
+
+    async def run():
+        adapter = FailoverAdapter([("bad", AlwaysFail())], quarantine_on_failure=True)
+        tools = WorkspaceTools(str(tmp_path))
+        return await AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=4, repair_attempts=6)).run(
+            [{"role": "user", "content": "finish the task"}], tools.specs()
+        )
+
+    result = asyncio.run(run())
+    assert result["status"] == "failed"
+    assert result["steps"] == 0
+    assert result["repairs"] == 0
+    assert result["provider_failover_exhausted"] is True
 
 
 def test_workspace_blocks_escape(tmp_path):
