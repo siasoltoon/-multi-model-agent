@@ -16,8 +16,9 @@ def test_run_command_allows_safe_inspection_commands(tmp_path):
 
 def test_run_command_supports_safe_and_chain(tmp_path):
     tools = WorkspaceTools(str(tmp_path))
-    result = asyncio.run(tools.run_command({"command": "pwd && git status --short"}))
+    result = asyncio.run(tools.run_command({"command": "pwd && ls -la"}))
     assert result["exit_code"] == 0
+    assert str(tmp_path) in result["output"]
 
 
 def test_run_command_rejects_shell_injection(tmp_path):
