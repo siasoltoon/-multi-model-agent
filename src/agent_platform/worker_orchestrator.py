@@ -73,8 +73,8 @@ class WorkerOrchestrator:
             score += 15.0
         if models:
             score += len(models) * 5.0
-        # Prefer workers with spare capacity and penalize saturated load.
-        score += worker.available_slots * 8.0
+        # Capacity is a bounded tie-breaker, while live load remains the dominant signal.
+        score += min(worker.available_slots, 4) * 8.0
         score -= worker.load_ratio * 30.0
         return True, score, matched
 
