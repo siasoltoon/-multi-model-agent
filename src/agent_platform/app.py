@@ -151,16 +151,39 @@ async def shutdown_lifecycle():
                 close()
 
 
-@app.get("/health", response_model=HealthResponse)
-def health():
+def _dependency_status() -> dict[str, object]:
+    database_ok = False
+    try:
+        database_ok = bool(store.ping())
+    except Exception:
+        database_ok = False
     redis_ok = None
     if settings.redis_url:
         try:
             from .queue import RedisTaskQueue
-            redis_ok = RedisTaskQueue(settings.redis_url).ping()
+            redis_ok = bool(RedisTaskQueue(settings.redis_url).ping())
         except Exception:
             redis_ok = False
-    return {"status": "ok" if redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
+    return {"database": database_ok, "redis": redis_ok}
+
+
+@app.get("/health", response_model=HealthResponse)
+def health():
+    deps = _dependency_status()
+    redis_ok = deps["redis"]
+    database_ok = bool(deps["database"])
+    return {"status": "ok" if database_ok and redis_ok is not False else "degraded", "database": "postgres" if leases else "sqlite", "redis": redis_ok}
+
+
+@app.get("/ready")
+def readiness():
+    deps = _dependency_status()
+    database_ok = bool(deps["database"])
+    redis_ok = deps["redis"]
+    ready = database_ok and redis_ok is not False
+    if not ready:
+        raise HTTPException(503, {"status": "not_ready", **deps})
+    return {"status": "ready", **deps}
 
 
 @app.get("/")
