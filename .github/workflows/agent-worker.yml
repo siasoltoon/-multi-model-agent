@@ -71,9 +71,11 @@ jobs:
             git checkout -B "$WORKING_BRANCH"
           fi
       - name: Install agent
+        working-directory: workspace
         run: pip install -e '.[dev]'
       - name: Execute agent
         id: agent
+        working-directory: workspace
         env:
           AGENT_TASK_PROMPT: ${{ inputs.task_prompt }}
           AGENT_TASK_ID: ${{ inputs.task_id }}
