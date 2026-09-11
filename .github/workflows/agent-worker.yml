@@ -129,14 +129,22 @@ jobs:
           git push --set-upstream origin "$WORKING_BRANCH"
       - name: Open or update PR
         if: steps.result.outputs.status == 'completed' || steps.result.outputs.status == 'checkpointed'
-        continue-on-error: true
         working-directory: workspace
         env:
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
+          AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           TARGET_REPOSITORY: ${{ inputs.repository }}
           WORKING_BRANCH: ${{ inputs.working_branch }}
           BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
+          # The default GITHUB_TOKEN is intentionally not used to create PRs:
+          # many repositories/orgs block Actions from creating pull requests.
+          # Branch progress is already pushed above, so absence of a dedicated
+          # token is a successful, non-error outcome rather than a red step.
+          if [ -z "${AGENT_GITHUB_TOKEN:-}" ]; then
+            echo 'Skipping PR creation: AGENT_GITHUB_TOKEN is not configured.'
+            exit 0
+          fi
           if gh pr view "$WORKING_BRANCH" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
           if [ "$(git rev-list --count "origin/$BASE_BRANCH..HEAD")" -gt 0 ]; then
             gh pr create --repo "$TARGET_REPOSITORY" --base "$BASE_BRANCH" --head "$WORKING_BRANCH" --title 'agent: verified task changes' --body 'Resumable automated coding-agent task.'
