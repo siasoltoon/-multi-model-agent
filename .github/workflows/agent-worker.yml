@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       task_id:
-        description: Control-plane task UUID
+        description: Control-plane task UUID or external task identifier
         required: true
         type: string
       task_prompt:
@@ -170,12 +170,32 @@ jobs:
         run: |
           python - <<'PY'
           import hashlib, hmac, json, os, time, urllib.request
+          from uuid import NAMESPACE_URL, UUID, uuid5
+
           path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'workspace', '.agent-result.json')
           if os.path.exists(path):
-              with open(path, encoding='utf-8') as f: payload = json.load(f)
+              with open(path, encoding='utf-8') as f:
+                  payload = json.load(f)
           else:
               payload = {'status': 'failed', 'error': 'worker ended before producing a result'}
-          payload.update({'task_id': os.environ['TASK_ID'], 'run_id': os.environ['RUN_ID'], 'worker_id': os.environ['WORKER_ID'], 'attempt': int(os.environ['ATTEMPT'])})
+
+          external_task_id = os.environ['TASK_ID']
+          try:
+              callback_task_id = str(UUID(external_task_id))
+          except ValueError:
+              # Control-plane routes use UUID task identifiers. Manual/E2E
+              # workflows may use human-readable IDs, so derive the same stable
+              # UUID used by worker_entry.py while retaining the original ID in
+              # the callback payload for external correlation.
+              callback_task_id = str(uuid5(NAMESPACE_URL, f'multi-model-agent:task:{external_task_id}'))
+
+          payload.update({
+              'task_id': callback_task_id,
+              'external_task_id': external_task_id,
+              'run_id': os.environ['RUN_ID'],
+              'worker_id': os.environ['WORKER_ID'],
+              'attempt': int(os.environ['ATTEMPT']),
+          })
           data = json.dumps(payload, ensure_ascii=False, default=str, separators=(',', ':')).encode()
           timestamp = str(int(time.time()))
           secret = os.environ.get('CALLBACK_TOKEN', '')
@@ -183,8 +203,15 @@ jobs:
           headers = {'Content-Type': 'application/json'}
           if secret:
               headers.update({'X-Agent-Timestamp': timestamp, 'X-Agent-Signature': signature})
-          request = urllib.request.Request(os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/worker-callback', data=data, headers=headers, method='POST')
+          request = urllib.request.Request(
+              os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + callback_task_id + '/worker-callback',
+              data=data,
+              headers=headers,
+              method='POST',
+          )
           try:
-              with urllib.request.urlopen(request, timeout=30) as response: print(response.read().decode())
-          except Exception as exc: print('callback warning:', exc)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(response.read().decode())
+          except Exception as exc:
+              print('callback warning:', exc)
           PY
