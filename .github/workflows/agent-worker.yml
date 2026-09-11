@@ -80,7 +80,12 @@ jobs:
               raise SystemExit('control-plane returned a different task id')
           if task.get('status') in {'completed', 'cancelled'}:
               raise SystemExit(f'control-plane task is not runnable: {task.get("status")}')
-          print(f'control-plane task verified: {task_id} status={task.get("status")}')
+          worker_attempt = int(task.get('attempts', 0))
+          if worker_attempt < 1:
+              raise SystemExit(f'control-plane task has not been dispatched yet: attempts={worker_attempt}')
+          print(f'control-plane task verified: {task_id} status={task.get("status")} worker_attempt={worker_attempt}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'WORKER_ATTEMPT={worker_attempt}\n')
           PY
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -195,7 +200,7 @@ jobs:
           CALLBACK_TOKEN: ${{ secrets.AGENT_CALLBACK_TOKEN }}
           TASK_ID: ${{ inputs.task_id }}
           RUN_ID: ${{ github.run_id }}
-          ATTEMPT: ${{ github.run_attempt }}
+          ATTEMPT: ${{ env.WORKER_ATTEMPT }}
           WORKER_ID: github-actions-${{ github.run_id }}
         run: |
           python - <<'PY'
