@@ -81,6 +81,7 @@ jobs:
           AGENT_CHECKPOINT_JSON: ${{ inputs.checkpoint_json }}
           AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
           AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
