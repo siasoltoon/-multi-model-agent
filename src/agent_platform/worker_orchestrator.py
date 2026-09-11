@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Any
@@ -73,12 +74,32 @@ class WorkerOrchestrator:
             score += 15.0
         if models:
             score += len(models) * 5.0
-        # Capacity is a bounded load-balancing signal, not a provider preference.
         score += min(worker.available_slots, 4) * 1.0
         score -= worker.load_ratio * 30.0
         return True, score, matched
 
+    def _reconcile_runtime_load(self) -> None:
+        """Synchronize worker capacity from the control plane's durable tasks.
+
+        The registry is intentionally in-memory, so after a process restart its
+        counters can be empty while PostgreSQL/SQLite still has RUNNING tasks.
+        When the app module is already loaded, reconcile from its store before
+        every scheduling decision. Tests and standalone orchestrator users do
+        not need to import the control plane.
+        """
+        app_module = sys.modules.get("agent_platform.app")
+        store = getattr(app_module, "store", None) if app_module else None
+        if store is None:
+            return
+        try:
+            self.registry.reconcile_active_tasks(store.list())
+        except Exception:
+            # Scheduling must remain available if a telemetry reconciliation
+            # read temporarily fails; the durable lease still protects claims.
+            return
+
     def candidates(self, requirements: Mapping[str, Any] | None = None) -> list[WorkerCandidate]:
+        self._reconcile_runtime_load()
         live = self.registry.online()
         result: list[WorkerCandidate] = []
         for worker in live:
@@ -86,9 +107,6 @@ class WorkerOrchestrator:
                 continue
             fits, score, matched = self._fit(worker, requirements)
             if fits:
-                # Real workers are preferred over synthetic GitHub fallback.
-                # Among real workers of the same kind, capability/resource/load
-                # scoring decides; laptop remains the default execution kind.
                 if worker.kind == WorkerKind.LAPTOP.value:
                     priority = 0
                     score += 20.0
@@ -96,17 +114,7 @@ class WorkerOrchestrator:
                 else:
                     priority = 10
                     kind = WorkerKind.GITHUB
-                result.append(WorkerCandidate(
-                    kind,
-                    worker.worker_id,
-                    priority,
-                    worker.endpoint,
-                    score,
-                    matched,
-                    worker.active_tasks,
-                    worker.max_concurrent_tasks,
-                    worker.available_slots,
-                ))
+                result.append(WorkerCandidate(kind, worker.worker_id, priority, worker.endpoint, score, matched, worker.active_tasks, worker.max_concurrent_tasks, worker.available_slots))
 
         if self.github_enabled:
             github_worker = Worker(
