@@ -55,11 +55,28 @@ async def _router() -> SmartRouter:
     return router
 
 
+async def _lease_heartbeat(client: httpx.AsyncClient, base_url: str, worker_id: str, lease_id: str, headers: dict[str, str], interval: float) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            response = await client.post(
+                f"{base_url}/api/workers/{worker_id}/heartbeat",
+                headers=headers,
+                params={"status": "busy", "lease_id": lease_id},
+            )
+            response.raise_for_status()
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPError as exc:
+            print(f"worker heartbeat error: {exc}", flush=True)
+
+
 async def run_worker() -> int:
     worker_id = _worker_id()
     base_url = _base_url()
     workspace = _workspace()
     poll_seconds = float(os.getenv("AGENT_WORKER_POLL_SECONDS", "5"))
+    heartbeat_seconds = float(os.getenv("AGENT_WORKER_HEARTBEAT_SECONDS", "15"))
     endpoint = os.getenv("AGENT_WORKER_ENDPOINT", "")
     headers = _headers()
 
@@ -90,6 +107,7 @@ async def run_worker() -> int:
 
                 heartbeat = await client.post(f"{base_url}/api/workers/{worker_id}/heartbeat", headers=headers, params={"status": "busy", "lease_id": lease_id})
                 heartbeat.raise_for_status()
+                lease_heartbeat = asyncio.create_task(_lease_heartbeat(client, base_url, worker_id, lease_id, headers, max(5.0, heartbeat_seconds)))
                 try:
                     result = await run_task(task, router, workspace)
                     payload = dict(result)
@@ -102,6 +120,10 @@ async def run_worker() -> int:
                     })
                 except Exception as exc:
                     payload = {"status": "failed", "error": str(exc), "worker_id": worker_id, "attempt": attempt, "steps": task.current_step, "repairs": task.repair_attempts}
+                finally:
+                    lease_heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await lease_heartbeat
 
                 heartbeat = await client.post(f"{base_url}/api/workers/{worker_id}/heartbeat", headers=headers, params={"status": "online", "lease_id": lease_id})
                 heartbeat.raise_for_status()
