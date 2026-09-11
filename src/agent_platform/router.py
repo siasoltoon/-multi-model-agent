@@ -37,12 +37,7 @@ class SmartRouter:
 
     @staticmethod
     def is_zero_cost(endpoint: ModelEndpoint) -> bool:
-        """Return True only when the endpoint is explicitly proven cost-free.
-
-        This is intentionally a hard safety gate, not a ranking preference.
-        Unknown, trial, paid, and merely "candidate free" providers are never
-        eligible. Local runtimes are always zero-cost at the inference layer.
-        """
+        """Return True only when the endpoint is explicitly proven cost-free."""
         metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
         billing = str(metadata.get("billing_type", "unknown")).strip().lower()
         category = str(metadata.get("category", "")).strip().lower()
@@ -83,13 +78,19 @@ class SmartRouter:
 
     @staticmethod
     def _provider_priority(endpoint: ModelEndpoint) -> float:
+        """Use remote free providers by default; local inference is optional.
+
+        This prevents a weak local model from becoming the mandatory first hop.
+        Set AGENT_PREFER_LOCAL=true when the operator explicitly wants Ollama or
+        another local runtime preferred for privacy/offline/latency reasons.
+        """
         metadata = endpoint.metadata if isinstance(endpoint.metadata, dict) else {}
         billing = str(metadata.get("billing_type", "unknown")).lower()
         category = str(metadata.get("category", "")).lower()
         if billing == "local" or category == "local":
-            return 1.12
+            return 1.08 if os.getenv("AGENT_PREFER_LOCAL", "false").strip().lower() in {"1", "true", "yes", "on"} else 0.96
         if billing in {"free", "permanent_free"}:
-            return 0.95
+            return 1.0
         return 0.0
 
     def _candidates(self, *, min_context: int, tools: bool) -> list[ModelEndpoint]:
