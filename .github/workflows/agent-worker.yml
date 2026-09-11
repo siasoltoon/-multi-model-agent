@@ -84,6 +84,8 @@ jobs:
           AGENT_TIMEOUT_SECONDS: '19800'
           AGENT_WORKSPACE: ${{ github.workspace }}/workspace
           AGENT_MODEL_MAX_TOKENS: '1024'
+          AGENT_ALLOW_PAID_OPENROUTER: 'false'
+          AGENT_OPENROUTER_FREE_MODEL: 'openrouter/free'
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
           AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
