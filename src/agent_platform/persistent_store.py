@@ -30,6 +30,11 @@ class PersistentTaskStore:
         self.db.execute("CREATE INDEX IF NOT EXISTS task_events_task_idx ON task_events(task_id, id DESC)")
         self.db.commit()
 
+    def ping(self) -> bool:
+        with self._lock:
+            self.db.execute("SELECT 1").fetchone()
+        return True
+
     def save(self, task: Task) -> Task:
         with self._lock:
             self.db.execute("INSERT OR REPLACE INTO tasks(id,payload,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)", (str(task.id), task.model_dump_json()))
