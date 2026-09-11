@@ -62,6 +62,40 @@ def test_agent_loop_retries_provider_failure_without_consuming_step_budget(tmp_p
     assert adapter.calls == 2
 
 
+def test_agent_loop_checkpoints_when_step_budget_is_exhausted(tmp_path):
+    class ToolOnlyAdapter:
+        async def generate(self, messages, *, tools=None):
+            return ModelResponse("", {}, {}, [{"id": "call-1", "name": "write_file", "arguments": {"path": "x.txt", "content": "ok"}}])
+
+    async def run():
+        tools = WorkspaceTools(str(tmp_path))
+        return await AgentLoop(ToolOnlyAdapter(), tools.as_tools(), AgentPolicy(max_steps=1)).run(
+            [{"role": "user", "content": "keep working"}], tools.specs()
+        )
+
+    result = asyncio.run(run())
+    assert result["status"] == "checkpointed"
+    assert result["steps"] == 1
+    assert result["checkpoint_reason"] == "step_budget"
+
+
+def test_agent_loop_checkpoints_on_timeout_with_distinct_reason(tmp_path):
+    class SlowAdapter:
+        async def generate(self, messages, *, tools=None):
+            await asyncio.sleep(0.01)
+            return ModelResponse("done", {}, {}, [])
+
+    async def run():
+        tools = WorkspaceTools(str(tmp_path))
+        return await AgentLoop(SlowAdapter(), tools.as_tools(), AgentPolicy(max_steps=4, timeout_seconds=0.001)).run(
+            [{"role": "user", "content": "finish"}], tools.specs()
+        )
+
+    result = asyncio.run(run())
+    assert result["status"] == "checkpointed"
+    assert result["checkpoint_reason"] == "timeout"
+
+
 def test_agent_loop_does_not_spend_repair_attempts_on_provider_exhaustion(tmp_path):
     class AlwaysFail:
         async def generate(self, messages, *, tools=None):
