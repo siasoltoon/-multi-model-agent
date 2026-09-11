@@ -21,9 +21,6 @@ class ProviderSpec:
     auth_scheme: str = "bearer"
 
 
-# The verified API contract is the single source of truth for live endpoints.
-# Registry metadata remains the catalog, while contract URLs prevent drift
-# between discovery and actual provider activation.
 _registry_by_id = {item.provider_id: item for item in PROVIDER_REGISTRY}
 BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
     ProviderSpec(
@@ -100,10 +97,17 @@ class ProviderDiscovery:
         items = data.get("data", []) if isinstance(data, dict) else data
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
+        allow_paid_openrouter = os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
             model = str(item["id"])
+            pricing = item.get("pricing")
+            is_free = _is_free_pricing(pricing)
+            # On OpenRouter, an account may have no usable paid balance. Prefer
+            # genuinely free models and do not select paid models unless explicitly enabled.
+            if spec.name == "openrouter" and not is_free and not allow_paid_openrouter:
+                continue
             context = int(item.get("context_length") or item.get("context_window") or (registry.default_context_window if registry else 32768))
             supported = item.get("supported_parameters") or []
             tool_support = "tools" in supported or "tool_choice" in supported or not supported
@@ -112,17 +116,18 @@ class ProviderDiscovery:
                 "owned_by": item.get("owned_by"),
                 "created": item.get("created"),
                 "supported_parameters": supported,
-                "pricing": item.get("pricing"),
+                "pricing": pricing,
                 "registry": registry.to_metadata() if registry else {},
                 "api_verified": True,
             }
+            billing_type = "free" if is_free else (registry.billing_type if registry and registry.billing_type != "unknown" else "paid_or_unknown")
             result.append(DiscoveredEndpoint(
                 provider=spec.name,
                 model=model,
                 base_url=spec.base_url,
                 context_window=context,
                 tool_support=tool_support,
-                billing_type=(registry.billing_type if registry else ("free" if _is_free_pricing(item.get("pricing")) else "paid_or_unknown")),
+                billing_type=billing_type,
                 api_key_env=spec.api_key_env,
                 source=spec.models_url,
                 metadata=metadata,
