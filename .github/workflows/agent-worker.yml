@@ -63,12 +63,21 @@ jobs:
         working-directory: workspace
         env:
           WORKING_BRANCH: ${{ inputs.working_branch }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          CHECKPOINT_JSON: ${{ inputs.checkpoint_json }}
         run: |
           git fetch origin --prune
           if git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
             git checkout -B "$WORKING_BRANCH" "origin/$WORKING_BRANCH"
+            # A task with no checkpoint is a fresh execution. Never execute a
+            # stale worker branch that may contain an older agent implementation;
+            # start it from the requested base branch instead. Checkpointed
+            # executions intentionally keep the persistent branch unchanged.
+            if [ -z "${CHECKPOINT_JSON//[[:space:]]/}" ]; then
+              git reset --hard "origin/$BASE_BRANCH"
+            fi
           else
-            git checkout -B "$WORKING_BRANCH"
+            git checkout -B "$WORKING_BRANCH" "origin/$BASE_BRANCH"
           fi
       - name: Install agent
         working-directory: workspace
