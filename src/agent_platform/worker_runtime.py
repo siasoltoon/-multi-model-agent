@@ -32,9 +32,37 @@ def _workspace() -> str:
     return str(Path(os.getenv("AGENT_WORKSPACE", os.getcwd())).resolve())
 
 
+def _capabilities() -> list[str]:
+    raw = os.getenv("AGENT_WORKER_CAPABILITIES", "coding,testing,tools")
+    return sorted({item.strip().lower() for item in raw.split(",") if item.strip()})
+
+
+def _models() -> list[str]:
+    raw = os.getenv("AGENT_WORKER_MODELS", "")
+    return sorted({item.strip() for item in raw.split(",") if item.strip()})
+
+
+def _optional_int(name: str) -> int | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _gpu_available() -> bool:
+    return os.getenv("AGENT_WORKER_GPU", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _router() -> SmartRouter:
     router = SmartRouter()
-    for item in await ProviderDiscovery().discover():
+    discovered = await ProviderDiscovery().discover()
+    discovered_models: list[str] = []
+    for item in discovered:
+        discovered_models.append(item.model)
         router.register(ModelEndpoint(
             id=f"{item.provider}:{item.model}:{item.base_url}",
             provider=item.provider,
@@ -53,6 +81,8 @@ async def _router() -> SmartRouter:
         model = os.getenv("AGENT_MODEL", "")
         if base and model:
             router.register(ModelEndpoint("env", "env", model, base_url=base, tool_support=True))
+    if not os.getenv("AGENT_WORKER_MODELS") and discovered_models:
+        os.environ["AGENT_WORKER_MODELS"] = ",".join(sorted(set(discovered_models)))
     return router
 
 
@@ -82,15 +112,25 @@ async def run_worker() -> int:
     headers = _headers()
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{base_url}/api/workers/register",
-            headers=headers,
-            json={"worker_id": worker_id, "endpoint": endpoint, "status": "online"},
-        )
-        response.raise_for_status()
         router = await _router()
         if not router.endpoints:
             raise RuntimeError("No model endpoint discovered for laptop worker")
+        response = await client.post(
+            f"{base_url}/api/workers/register",
+            headers=headers,
+            json={
+                "worker_id": worker_id,
+                "endpoint": endpoint,
+                "status": "online",
+                "kind": "laptop",
+                "capabilities": _capabilities(),
+                "cpu_cores": _optional_int("AGENT_WORKER_CPU_CORES") or os.cpu_count(),
+                "memory_mb": _optional_int("AGENT_WORKER_MEMORY_MB"),
+                "gpu": _gpu_available(),
+                "models": _models(),
+            },
+        )
+        response.raise_for_status()
 
         while True:
             try:
