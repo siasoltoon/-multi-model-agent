@@ -81,6 +81,26 @@ def test_agent_loop_does_not_spend_repair_attempts_on_provider_exhaustion(tmp_pa
     assert result["provider_failover_exhausted"] is True
 
 
+def test_workspace_accepts_common_python_and_chain_commands(tmp_path):
+    tools = WorkspaceTools(str(tmp_path))
+    result = asyncio.run(tools.run_command({"command": "python3 -c \"print('ok')\" && echo done"}))
+    assert result["exit_code"] == 0
+    assert "ok" in result["output"]
+    assert "done" in result["output"]
+
+
+def test_workspace_reports_allowed_commands_for_model_repair(tmp_path):
+    tools = WorkspaceTools(str(tmp_path))
+    try:
+        asyncio.run(tools.run_command({"command": "unknown-command --version"}))
+        assert False, "unknown command was accepted"
+    except ValueError as exc:
+        message = str(exc)
+        assert "unknown-command" in message
+        assert "python3" in message
+        assert "pytest" in message
+
+
 def test_workspace_blocks_escape(tmp_path):
     tools = WorkspaceTools(str(tmp_path))
     try:
