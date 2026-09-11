@@ -23,10 +23,11 @@ class ModelAdapter(Protocol):
 
 
 class ModelRequestError(RuntimeError):
-    def __init__(self, status_code: int | None, message: str, retryable: bool = False, retry_after: float | None = None):
+    def __init__(self, status_code: int | None, message: str, retryable: bool = False, retry_after: float | None = None, quota_exhausted: bool = False):
         self.status_code = status_code
         self.retryable = retryable
         self.retry_after = retry_after
+        self.quota_exhausted = quota_exhausted
         super().__init__(redact_secrets(message)[:1000])
 
 
@@ -38,6 +39,22 @@ class ProviderFailoverExhausted(RuntimeError):
         self.last_error = last_error
         detail = str(last_error) if last_error else "all model endpoints failed"
         super().__init__(f"provider failover exhausted after {len(endpoint_ids)} endpoint(s): {detail}")
+
+
+def is_provider_quota_exhausted(error: BaseException) -> bool:
+    """Detect account/provider-wide quota exhaustion, not ordinary transient 429s."""
+    if isinstance(error, ModelRequestError) and error.quota_exhausted:
+        return True
+    text = str(error).lower()
+    return any(marker in text for marker in (
+        "free-models-per-day",
+        "daily quota",
+        "daily limit",
+        "quota exhausted",
+        "quota_exceeded",
+        "insufficient_quota",
+        "billing limit",
+    ))
 
 
 class OpenAICompatibleAdapter:
@@ -76,9 +93,16 @@ class OpenAICompatibleAdapter:
                 try:
                     error_payload = response.json()
                     message = error_payload.get("error", {}).get("message", "provider request failed") if isinstance(error_payload, dict) else "provider request failed"
+                    if isinstance(error_payload, dict) and isinstance(error_payload.get("error"), dict):
+                        error_code = error_payload["error"].get("code")
+                        if error_code:
+                            message = f"{message} (code={error_code})"
                 except (ValueError, TypeError):
                     message = response.text[:500] or "provider request failed"
-                raise ModelRequestError(response.status_code, str(message), retryable, retry_after)
+                quota_exhausted = is_provider_quota_exhausted(ModelRequestError(response.status_code, str(message)))
+                if quota_exhausted:
+                    retryable = False
+                raise ModelRequestError(response.status_code, str(message), retryable, retry_after, quota_exhausted)
             except ModelRequestError as exc:
                 last_error = exc
                 if not exc.retryable or attempt >= self.retry_policy.attempts:
