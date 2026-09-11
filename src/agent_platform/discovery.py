@@ -216,16 +216,20 @@ class ProviderDiscovery:
         if _allow_paid_openrouter():
             return cls._dedupe(items)
         filtered = [
-            item for item in items
+            item
+            for item in items
             if item.provider != "openrouter" or _is_free_openrouter_model(item.model)
         ]
-        if not any(item.provider == "openrouter" for item in filtered):
-            spec = next((item for item in cls.__dict__.get("BUILTIN_PROVIDERS", ()) if item.name == "openrouter"), None)
-            base_url = "https://openrouter.ai/api/v1"
-            api_key_env = "OPENROUTER_API_KEY"
-            if spec:
-                base_url = spec.base_url
-                api_key_env = spec.api_key_env
+        # A free OpenRouter fallback is useful only when OpenRouter is actually
+        # configured. Do not invent an unusable endpoint for callers that are
+        # intentionally testing/configuring another provider without credentials.
+        if (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            and not any(item.provider == "openrouter" for item in filtered)
+        ):
+            spec = next((item for item in BUILTIN_PROVIDERS if item.name == "openrouter"), None)
+            base_url = spec.base_url if spec else "https://openrouter.ai/api/v1"
+            api_key_env = spec.api_key_env if spec else "OPENROUTER_API_KEY"
             filtered.append(DiscoveredEndpoint(
                 provider="openrouter",
                 model=os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free",
