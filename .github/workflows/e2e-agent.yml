@@ -10,7 +10,7 @@ on:
       repository:
         description: Target repository containing agent-worker.yml
         required: false
-        default: sia644434/multi-model-agent
+        default: sia644a434/multi-model-agent
         type: string
       base_branch:
         description: Target base branch
@@ -66,21 +66,30 @@ jobs:
               'max_steps': int(os.environ['MAX_STEPS']),
               'metadata': metadata,
           }
+          url = base + '/api/tasks'
           request = urllib.request.Request(
-              base + '/api/tasks',
+              url,
               data=json.dumps(payload).encode(),
               headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
               method='POST',
           )
+          print(f'create endpoint={url}', flush=True)
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
-                  task = json.loads(response.read().decode())
+                  body = response.read().decode()
+                  print(f'create HTTP {response.status}', flush=True)
+                  task = json.loads(body)
           except urllib.error.HTTPError as exc:
-              raise SystemExit(f'task creation failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
+              body = exc.read().decode(errors='replace')
+              raise SystemExit(f'task creation failed: HTTP {exc.code}: {body}') from exc
+          except urllib.error.URLError as exc:
+              raise SystemExit(f'task creation failed: network error: {exc}') from exc
+          except TimeoutError as exc:
+              raise SystemExit(f'task creation failed: request timed out after 30s: {url}') from exc
           task_id = str(task.get('id') or '')
           if not task_id:
               raise SystemExit(f'control plane returned no task id: {task}')
-          print(f'created task: {task_id}')
+          print(f'created task: {task_id}', flush=True)
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
               out.write(f'task_id={task_id}\n')
           PY
@@ -97,12 +106,18 @@ jobs:
           import urllib.request
 
           url = os.environ['CONTROL_PLANE_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/dispatch'
-          request = urllib.request.Request(url, data=b'{}', headers={'Content-Type': 'application/json'}, method='POST')
+          request = urllib.request.Request(url, data=b'{}', headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, method='POST')
+          print(f'dispatch endpoint={url}', flush=True)
           try:
               with urllib.request.urlopen(request, timeout=30) as response:
-                  print(response.read().decode())
+                  body = response.read().decode()
+                  print(f'dispatch HTTP {response.status}: {body}', flush=True)
           except urllib.error.HTTPError as exc:
               raise SystemExit(f'task dispatch failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
+          except urllib.error.URLError as exc:
+              raise SystemExit(f'task dispatch failed: network error: {exc}') from exc
+          except TimeoutError as exc:
+              raise SystemExit(f'task dispatch failed: request timed out after 30s: {url}') from exc
           PY
 
       - name: Watch complete lifecycle
@@ -121,24 +136,58 @@ jobs:
           base = os.environ['CONTROL_PLANE_URL'].rstrip('/')
           task_id = os.environ['TASK_ID']
           interval = max(2, int(os.environ['POLL_SECONDS']))
+          poll_url = base + '/api/tasks/' + task_id
           deadline = time.time() + 330 * 60
           last = None
+          poll_count = 0
+
+          print(f'task_id={task_id}', flush=True)
+          print(f'poll_endpoint={poll_url}', flush=True)
+          print(f'poll_interval={interval}s request_timeout=30s', flush=True)
 
           while time.time() < deadline:
-              request = urllib.request.Request(base + '/api/tasks/' + task_id, headers={'Accept': 'application/json'})
+              poll_count += 1
+              started = time.monotonic()
+              request = urllib.request.Request(poll_url, headers={'Accept': 'application/json'})
+              print(f'poll #{poll_count} -> GET {poll_url}', flush=True)
               try:
                   with urllib.request.urlopen(request, timeout=30) as response:
-                      task = json.loads(response.read().decode())
+                      body = response.read().decode()
+                      elapsed = time.monotonic() - started
+                      print(f'poll #{poll_count} <- HTTP {response.status} in {elapsed:.2f}s', flush=True)
+                      try:
+                          task = json.loads(body)
+                      except json.JSONDecodeError as exc:
+                          raise SystemExit(f'task polling returned invalid JSON: {exc}; body={body[:1000]!r}') from exc
               except urllib.error.HTTPError as exc:
-                  raise SystemExit(f'task polling failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
-              state = (task.get('status'), task.get('current_step'), task.get('attempts'), task.get('repair_attempts'), task.get('error'))
+                  elapsed = time.monotonic() - started
+                  body = exc.read().decode(errors='replace')
+                  raise SystemExit(f'task polling failed: HTTP {exc.code} after {elapsed:.2f}s: {body}') from exc
+              except urllib.error.URLError as exc:
+                  elapsed = time.monotonic() - started
+                  raise SystemExit(f'task polling failed: network error after {elapsed:.2f}s: {exc}') from exc
+              except TimeoutError as exc:
+                  elapsed = time.monotonic() - started
+                  raise SystemExit(f'task polling failed: request timed out after {elapsed:.2f}s: {poll_url}') from exc
+
+              state = (
+                  task.get('status'),
+                  task.get('current_step'),
+                  task.get('attempts'),
+                  task.get('repair_attempts'),
+                  task.get('error'),
+              )
               if state != last:
-                  print(f'status={state[0]} step={state[1]} worker_attempts={state[2]} repairs={state[3]} error={state[4]}')
+                  print(
+                      f'status={state[0]} step={state[1]} '
+                      f'worker_attempts={state[2]} repairs={state[3]} error={state[4]}',
+                      flush=True,
+                  )
                   last = state
               if state[0] in {'completed', 'failed', 'cancelled'}:
                   if state[0] != 'completed':
                       raise SystemExit(f'E2E task did not complete: {json.dumps(task, ensure_ascii=False, default=str)}')
-                  print('E2E lifecycle completed successfully')
+                  print('E2E lifecycle completed successfully', flush=True)
                   break
               time.sleep(interval)
           else:
