@@ -36,6 +36,32 @@ def test_agent_loop_executes_tools_and_preserves_tool_protocol(tmp_path):
     assert tool["tool_call_id"] == "call-1"
 
 
+def test_agent_loop_retries_provider_failure_without_consuming_step_budget(tmp_path):
+    class RetryAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, messages, *, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary gateway failure")
+            return ModelResponse("done", {}, {}, [])
+
+    async def run():
+        adapter = RetryAdapter()
+        tools = WorkspaceTools(str(tmp_path))
+        result = await AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=1, repair_attempts=2)).run(
+            [{"role": "user", "content": "finish the task"}], tools.specs()
+        )
+        return result, adapter
+
+    result, adapter = asyncio.run(run())
+    assert result["status"] == "completed"
+    assert result["steps"] == 1
+    assert result["repairs"] == 1
+    assert adapter.calls == 2
+
+
 def test_workspace_blocks_escape(tmp_path):
     tools = WorkspaceTools(str(tmp_path))
     try:
