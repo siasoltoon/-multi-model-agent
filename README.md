@@ -43,8 +43,8 @@ Current built-in provider variables:
 
 Optional runtime controls:
 
-- `AGENT_MAX_PROVIDER_FAILOVERS=3`
-- `AGENT_MODEL_REQUEST_TIMEOUT=180`
+- `AGENT_MODEL_FAILOVER_ATTEMPTS=3`
+- `AGENT_MODEL_REQUEST_TIMEOUT_SECONDS=180`
 - `OLLAMA_BASE_URL=http://127.0.0.1:11434`
 - `AGENT_PROVIDER_CATALOGS=`
 
@@ -108,7 +108,7 @@ Recommended production values:
 - `AGENT_WORKER_AUTH_TOKEN` — strong random token if worker API authentication is enabled.
 - `AGENT_MAX_WORKER_ATTEMPTS=5`
 - `AGENT_WORKER_LEASE_SECONDS=300`
-- `AGENT_MAX_PROVIDER_FAILOVERS=3`
+- `AGENT_MODEL_FAILOVER_ATTEMPTS=3`
 - `AGENT_MODEL_REQUEST_TIMEOUT_SECONDS=180`
 
 Optional:
@@ -124,7 +124,7 @@ Do not commit any of these secrets. The worker callback secret must match betwee
 2. Provision PostgreSQL and set `AGENT_DATABASE_URL` to its connection URL.
 3. Set `AGENT_PUBLIC_BASE_URL` after the Railway domain is available.
 4. Configure the GitHub token, worker repository/ref/workflow, and callback secret.
-5. Deploy and confirm `/health` reports a healthy application and PostgreSQL connection.
+5. Deploy and confirm `/ready` reports a healthy application and PostgreSQL connection.
 6. Add Redis only when multiple workers/distributed queueing is required.
 7. Submit a small test task from the CLI and use `multi-model-agent watch TASK_ID` to observe the full lifecycle.
 
