@@ -36,17 +36,20 @@ class AgentLoop:
         while steps < self.policy.max_steps:
             if time.monotonic() - started >= self.policy.timeout_seconds:
                 return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
-            steps += 1
             model_history = self.context_saver.compact(history)
             try:
                 response: ModelResponse = await self.adapter.generate(model_history, tools=tool_specs)
             except Exception as exc:
-                if repairs < self.policy.repair_attempts:
-                    repairs += 1
-                    history.append({"role": "system", "content": f"Model call failed. Retry safely. Error: {exc}"})
-                    continue
-                return {"status": "failed", "steps": steps, "repairs": repairs, "error": str(exc), "messages": history}
+                # Provider/model retries are recovery attempts, not productive
+                # agent steps. Do not let a transient gateway failure consume a
+                # tiny role budget (for example analysis may only have 2 steps).
+                repairs += 1
+                history.append({"role": "system", "content": f"Model call failed. Retry safely. Error: {exc}"})
+                if repairs >= self.policy.repair_attempts:
+                    return {"status": "failed", "steps": steps, "repairs": repairs, "error": str(exc), "messages": history}
+                continue
 
+            steps += 1
             assistant = {"role": "assistant", "content": response.text or None}
             if response.tool_calls:
                 assistant["tool_calls"] = [
@@ -76,7 +79,7 @@ class AgentLoop:
                     repairs += 1
                     result = {"error": str(exc)}
                 history.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, ensure_ascii=False, default=str)})
-                if repairs > self.policy.repair_attempts:
+                if repairs >= self.policy.repair_attempts:
                     return {"status": "failed", "steps": steps, "repairs": repairs, "error": "self-repair limit exceeded", "messages": history}
 
         return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
