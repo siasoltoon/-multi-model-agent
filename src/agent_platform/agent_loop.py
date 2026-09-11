@@ -28,6 +28,15 @@ class AgentLoop:
         self.policy = policy or AgentPolicy()
         self.context_saver = ContextSaver()
 
+    def _checkpoint(self, history: list[dict[str, Any]], steps: int, repairs: int, reason: str) -> dict[str, Any]:
+        return {
+            "status": "checkpointed",
+            "steps": steps,
+            "repairs": repairs,
+            "checkpoint_reason": reason,
+            "messages": history,
+        }
+
     async def run(self, messages: list[dict[str, Any]], tool_specs: list[dict[str, Any]]) -> dict[str, Any]:
         started = time.monotonic()
         history = list(messages)
@@ -35,13 +44,11 @@ class AgentLoop:
         steps = 0
         while steps < self.policy.max_steps:
             if time.monotonic() - started >= self.policy.timeout_seconds:
-                return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
+                return self._checkpoint(history, steps, repairs, "timeout")
             model_history = self.context_saver.compact(history)
             try:
                 response: ModelResponse = await self.adapter.generate(model_history, tools=tool_specs)
             except ProviderFailoverExhausted as exc:
-                # Provider outages are routing failures, not agent defects. They
-                # must never consume the six self-repair attempts.
                 history.append({"role": "system", "content": f"Provider failover exhausted. Error: {exc}"})
                 return {
                     "status": "failed",
@@ -53,9 +60,6 @@ class AgentLoop:
                     "messages": history,
                 }
             except Exception as exc:
-                # Provider/model retries are recovery attempts, not productive
-                # agent steps. Do not let a transient gateway failure consume a
-                # tiny role budget (for example analysis may only have 2 steps).
                 repairs += 1
                 history.append({"role": "system", "content": f"Model call failed. Retry safely. Error: {exc}"})
                 if repairs >= self.policy.repair_attempts:
@@ -95,4 +99,4 @@ class AgentLoop:
                 if repairs >= self.policy.repair_attempts:
                     return {"status": "failed", "steps": steps, "repairs": repairs, "error": "self-repair limit exceeded", "messages": history}
 
-        return {"status": "checkpointed", "steps": steps, "repairs": repairs, "messages": history}
+        return self._checkpoint(history, steps, repairs, "step_budget")
