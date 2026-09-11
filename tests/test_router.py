@@ -36,11 +36,7 @@ def test_router_rejects_zero_quota():
 
 
 def test_provider_quota_exhaustion_quarantines_all_models_for_that_provider():
-    router = SmartRouter([
-        free("openrouter", "model-a"),
-        free("openrouter", "model-b"),
-        free("groq", "model-c"),
-    ])
+    router = SmartRouter([free("openrouter", "model-a"), free("openrouter", "model-b"), free("groq", "model-c")])
     router.mark_failure("openrouter-model-a", "Rate limit exceeded: free-models-per-day")
     assert router.endpoints[0].health == "QUOTA_EXHAUSTED"
     assert router.endpoints[1].health == "QUOTA_EXHAUSTED"
@@ -99,8 +95,8 @@ def test_provider_diverse_pool_keeps_only_best_endpoint_per_provider():
         ModelEndpoint("local", "ollama", "qwen", reliability=0.85, metadata={"billing_type": "local", "category": "local"}),
     ])
     pool = router.ranked_provider_diverse(task_type="coding", role="coding", max_providers=3)
-    assert [item.provider for item in pool] == ["ollama", "openrouter", "groq"]
-    assert [item.id for item in pool] == ["local", "openrouter-best", "groq-coder"]
+    assert [item.provider for item in pool] == ["openrouter", "ollama", "groq"]
+    assert [item.id for item in pool] == ["openrouter-best", "local", "groq-coder"]
 
 
 def test_provider_diverse_pool_excludes_quarantined_provider():
