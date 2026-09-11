@@ -116,12 +116,7 @@ class OpenAICompatibleAdapter:
         raise last_error or RuntimeError("model request failed")
 
     async def generate(self, messages, *, tools=None) -> ModelResponse:
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": self.max_tokens,
-            "max_completion_tokens": self.max_tokens,
-        }
+        payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens, "max_completion_tokens": self.max_tokens}
         if tools:
             payload["tools"] = tools
         headers = {"Content-Type": "application/json"}
@@ -138,7 +133,7 @@ class OpenAICompatibleAdapter:
 
 
 class FailoverAdapter:
-    """Fail over across ranked endpoints and optionally quarantine failures for the phase."""
+    """Fail over across ranked endpoints and quarantine failures for the phase."""
 
     def __init__(self, adapters: list[tuple[str, ModelAdapter]], on_failure=None, *, quarantine_on_failure: bool = False):
         if not adapters:
@@ -162,11 +157,10 @@ class FailoverAdapter:
                 return response
             except Exception as exc:
                 last_error = exc
-                stop_failover = bool(self.on_failure(endpoint_id, exc)) if self.on_failure else False
+                if self.on_failure:
+                    self.on_failure(endpoint_id, exc)
                 if self.quarantine_on_failure:
                     self._quarantined.add(endpoint_id)
-                if stop_failover:
-                    break
         if self.quarantine_on_failure:
             raise ProviderFailoverExhausted(attempted or sorted(self._quarantined), last_error)
         raise last_error or RuntimeError("all model endpoints failed")

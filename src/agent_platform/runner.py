@@ -8,6 +8,9 @@ from .router import SmartRouter
 
 async def run_task(task: Task, router: SmartRouter, workspace: str) -> dict:
     """Run a task through the automatic role-based multi-model pipeline."""
+    prior_state = task.checkpoint.get("provider_state") if isinstance(task.checkpoint, dict) else None
+    if prior_state:
+        router.restore_provider_state(prior_state)
     result = await PhaseRunner(router, workspace).run(task)
     task.current_step = int(result.get("steps", task.current_step) or 0)
     task.repair_attempts = int(result.get("repairs", task.repair_attempts) or 0)
@@ -23,7 +26,7 @@ async def run_task(task: Task, router: SmartRouter, workspace: str) -> dict:
         task.metadata["last_provider"] = last.get("provider")
     if result.get("status") == "checkpointed":
         task.checkpoint = {
-            "version": 3,
+            "version": 4,
             "task_id": str(task.id),
             "active_role": result.get("active_role"),
             "checkpoint_reason": result.get("checkpoint_reason", "timeout"),
@@ -31,5 +34,6 @@ async def run_task(task: Task, router: SmartRouter, workspace: str) -> dict:
             "messages": redact_secrets(result.get("messages", [])),
             "steps": task.current_step,
             "repairs": task.repair_attempts,
+            "provider_state": redact_secrets(router.snapshot_provider_state()),
         }
     return result
