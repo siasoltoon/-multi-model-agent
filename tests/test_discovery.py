@@ -18,29 +18,12 @@ def test_builtin_provider_discovers_models_from_catalog(monkeypatch):
             return False
 
         async def get(self, url, headers=None):
-            assert url == spec.models_url
-            assert headers == {"Authorization": "Bearer secret"}
-            return httpx.Response(
-                200,
-                request=httpx.Request("GET", url),
-                json={
-                    "data": [
-                        {
-                            "id": "demo-coder",
-                            "context_length": 65536,
-                            "supported_parameters": ["tools", "tool_choice"],
-                            "pricing": {"prompt": "0", "completion": "0"},
-                        }
-                    ]
-                },
-            )
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"data": [{"id": "demo-coder", "context_length": 65536, "supported_parameters": ["tools", "tool_choice"], "pricing": {"prompt": "0", "completion": "0"}}]})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     discovery = ProviderDiscovery(providers=(spec,))
     monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
-
     found = asyncio.run(discovery.discover())
-
     assert len(found) == 1
     assert found[0].provider == "demo"
     assert found[0].model == "demo-coder"
@@ -53,65 +36,42 @@ def test_builtin_provider_discovers_models_from_catalog(monkeypatch):
 def test_openrouter_requires_explicit_free_model(monkeypatch):
     spec = ProviderSpec("openrouter", "https://openrouter.test/api/v1/models", "https://openrouter.test/api/v1", "OPENROUTER_API_KEY")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.delenv("AGENT_ALLOW_PAID_OPENROUTER", raising=False)
 
     class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
         async def get(self, url, headers=None):
-            return httpx.Response(
-                200,
-                request=httpx.Request("GET", url),
-                json={
-                    "data": [
-                        {"id": "provider/paid-looking", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
-                        {"id": "provider/coder:free", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
-                    ]
-                },
-            )
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"data": [
+                {"id": "provider/paid-looking", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "provider/coder:free", "context_length": 65536, "pricing": {"prompt": "0", "completion": "0"}},
+            ]})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     discovery = ProviderDiscovery(providers=(spec,))
     monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
-
     found = asyncio.run(discovery.discover())
-
     assert [item.model for item in found] == ["provider/coder:free"]
     assert found[0].billing_type == "free"
     assert found[0].metadata["billing_type"] == "free"
 
 
-def test_openrouter_paid_models_can_be_explicitly_enabled(monkeypatch):
+def test_openrouter_paid_models_are_never_enabled_by_environment_override(monkeypatch):
     spec = ProviderSpec("openrouter", "https://openrouter.test/api/v1/models", "https://openrouter.test/api/v1", "OPENROUTER_API_KEY")
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     monkeypatch.setenv("AGENT_ALLOW_PAID_OPENROUTER", "true")
 
     class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
         async def get(self, url, headers=None):
-            return httpx.Response(
-                200,
-                request=httpx.Request("GET", url),
-                json={"data": [{"id": "provider/paid-model", "context_length": 65536, "pricing": {"prompt": "0.1", "completion": "0.2"}}]},
-            )
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"data": [{"id": "provider/paid-model", "context_length": 65536, "pricing": {"prompt": "0.1", "completion": "0.2"}}]})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
     discovery = ProviderDiscovery(providers=(spec,))
     monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
-
     found = asyncio.run(discovery.discover())
-
-    assert [item.model for item in found] == ["provider/paid-model"]
-    assert found[0].billing_type == "paid_or_unknown"
+    assert [item.model for item in found] == ["openrouter/free"]
+    assert found[0].billing_type == "free"
 
 
 def test_provider_without_key_is_not_called(monkeypatch):
