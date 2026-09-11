@@ -63,13 +63,14 @@ def _summary(result: dict[str, Any]) -> str:
     return str(result.get("error") or result.get("status") or "")[-10000:]
 
 
-def _checkpoint_phases(task: Task) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]]]:
+def _checkpoint_phases(task: Task) -> tuple[list[dict[str, Any]], str | None, list[dict[str, Any]], str | None]:
     checkpoint = task.checkpoint or {}
     raw = checkpoint.get("phases", []) if isinstance(checkpoint, dict) else []
     phases = [dict(item) for item in raw if isinstance(item, dict) and item.get("role") in ROLE_ORDER]
     active_role = checkpoint.get("active_role") if isinstance(checkpoint, dict) else None
     messages = checkpoint.get("messages", []) if isinstance(checkpoint, dict) else []
-    return phases, active_role if active_role in ROLE_ORDER else None, messages if isinstance(messages, list) else []
+    reason = checkpoint.get("checkpoint_reason") if isinstance(checkpoint, dict) else None
+    return phases, active_role if active_role in ROLE_ORDER else None, messages if isinstance(messages, list) else [], reason
 
 
 class PhaseRunner:
@@ -117,22 +118,29 @@ class PhaseRunner:
             extras[index] += 1
         return {role: minimum + extras[index] for index, role in enumerate(ROLE_ORDER)}
 
+    def _next_role(self, role: str) -> str:
+        index = ROLE_ORDER.index(role)
+        # A budget-exhausted final verification starts a repair/verification
+        # continuation cycle on the next worker attempt instead of replaying
+        # verification forever.
+        return ROLE_ORDER[index + 1] if index + 1 < len(ROLE_ORDER) else "repair"
+
     async def run(self, task: Task) -> dict[str, Any]:
         started = monotonic()
         tools = WorkspaceTools(self.workspace, command_timeout=self.command_timeout)
-        phases, active_role, checkpoint_messages = _checkpoint_phases(task)
+        phases, active_role, checkpoint_messages, checkpoint_reason = _checkpoint_phases(task)
         completed_roles = {p["role"] for p in phases if p.get("status") == "completed"}
         prior = list(phases)
         total_steps = int(task.current_step or sum(int(p.get("steps", 0) or 0) for p in phases))
         total_repairs = int(task.repair_attempts or sum(int(p.get("repairs", 0) or 0) for p in phases))
-        resume_messages = checkpoint_messages if active_role else []
+        resume_messages = checkpoint_messages if active_role and checkpoint_reason != "phase_budget_exhausted" else []
         budgets = self._budgets(task.max_steps)
 
         for role in ROLE_ORDER:
             if role in completed_roles and role != active_role:
                 continue
             if monotonic() - started >= self.task_timeout:
-                return {"status": "checkpointed", "active_role": role, "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
+                return {"status": "checkpointed", "active_role": role, "checkpoint_reason": "timeout", "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
             adapter, selected = self._adapter(role)
             if role == active_role and resume_messages:
                 messages = resume_messages
@@ -151,7 +159,8 @@ class PhaseRunner:
             else:
                 self.router.mark_failure(active.id, result.get("error", f"{role} phase failed"))
             record = {
-                "role": role, "status": result.get("status"), "model": active.model, "provider": active.provider,
+                "role": role, "status": result.get("status"), "checkpoint_reason": result.get("checkpoint_reason"),
+                "model": active.model, "provider": active.provider,
                 "steps": result.get("steps", 0), "repairs": result.get("repairs", 0), "latency_ms": round(elapsed_ms, 2),
                 "summary": _summary(result),
             }
@@ -163,8 +172,16 @@ class PhaseRunner:
             if self.on_phase:
                 self.on_phase(record)
             if result.get("status") == "checkpointed":
+                reason = str(result.get("checkpoint_reason") or "timeout")
+                if reason == "step_budget":
+                    next_role = self._next_role(role)
+                    return {
+                        "status": "checkpointed", "active_role": next_role, "checkpoint_reason": "phase_budget_exhausted",
+                        "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": [],
+                    }
                 return {
-                    "status": "checkpointed", "active_role": role, "phases": phases, "steps": total_steps, "repairs": total_repairs,
+                    "status": "checkpointed", "active_role": role, "checkpoint_reason": reason,
+                    "phases": phases, "steps": total_steps, "repairs": total_repairs,
                     "messages": redact_secrets(result.get("messages", [])),
                 }
             if result.get("status") != "completed":
@@ -172,4 +189,4 @@ class PhaseRunner:
             completed_roles.add(role)
             active_role = None
             resume_messages = []
-        return {"status": "completed", "phases": phases, "steps": total_steps, "repairs": total_repairs, "models_used": [f"{p['provider']}/{p['model']}" for p in phases], "roles_completed": [p["role"] for p in phases]}
+        return {"status": "completed", "phases": phases, "steps": total_steps, "repairs": total_repairs, "models_used": [f"{p['provider']}/{p['model']}" for p in phases], "roles_completed": [p["role"] for p in phases if p.get("status") == "completed"]}
