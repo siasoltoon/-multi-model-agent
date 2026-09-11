@@ -82,23 +82,24 @@ class PhaseRunner:
         self.request_timeout = float(os.getenv("AGENT_MODEL_REQUEST_TIMEOUT_SECONDS", os.getenv("AGENT_MODEL_REQUEST_TIMEOUT", "180")))
         self.command_timeout = float(os.getenv("AGENT_COMMAND_TIMEOUT", "300"))
         self.task_timeout = float(os.getenv("AGENT_TIMEOUT_SECONDS", "1800"))
-        self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "3")))
+        self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "5")))
 
     def _adapter(self, role: str):
         ranked = self.router.ranked(min_context=4096, tools=ROLE_TOOLING[role], task_type=ROLE_TASK_TYPES[role], role=role)
         selected = ranked[: self.max_failover]
         if not selected:
             raise RuntimeError(f"no model endpoint available for role: {role}")
-        adapter = FailoverAdapter([(e.id, _build_adapter(e, self.request_timeout)) for e in selected], on_failure=lambda endpoint_id, error: self.router.mark_failure(endpoint_id, error))
+        adapter = FailoverAdapter(
+            [(e.id, _build_adapter(e, self.request_timeout)) for e in selected],
+            on_failure=lambda endpoint_id, error: self.router.mark_failure(endpoint_id, error),
+            quarantine_on_failure=True,
+        )
         return adapter, selected
 
     def _budgets(self, total: int) -> dict[str, int]:
         """Allocate the global budget so a 32-step run can actually reach coding and verification."""
         total = max(32, int(total))
         if total == 32:
-            # Eight roles cannot all receive a meaningful budget at this size.
-            # Keep every role present, but protect the phases that must inspect,
-            # implement, test, and verify instead of starving analysis at 3 calls.
             values = {"analysis": 4, "architecture": 3, "coding": 9, "testing": 5, "review": 2, "security": 1, "repair": 2, "verification": 6}
             if sum(values.values()) != 32:
                 raise AssertionError("invalid 32-step role budget")
