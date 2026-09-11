@@ -8,6 +8,7 @@ from .adapters import FailoverAdapter, OpenAICompatibleAdapter, is_provider_quot
 from .agent_loop import AgentLoop, AgentPolicy
 from .discovery import env_api_key
 from .models import Task
+from .orchestrator import DEFAULT_PHASE_GRAPH
 from .provider_api_catalog import get_api_contract
 from .provider_connections import build_provider_adapter
 from .provider_registry import get_provider
@@ -15,7 +16,7 @@ from .router import SmartRouter
 from .reliability import redact_secrets
 from .workspace_tools import WorkspaceTools
 
-ROLE_ORDER = ("analysis", "architecture", "coding", "testing", "review", "security", "repair", "verification")
+ROLE_ORDER = tuple(node.role for node in DEFAULT_PHASE_GRAPH.nodes)
 ROLE_TASK_TYPES = {"analysis": "coding", "architecture": "coding", "coding": "coding", "testing": "testing", "review": "review", "security": "review", "repair": "coding", "verification": "testing"}
 ROLE_TOOLING = {"analysis": False, "architecture": False, "coding": True, "testing": True, "review": False, "security": False, "repair": True, "verification": True}
 ROLE_WEIGHTS = {"analysis": 4, "architecture": 6, "coding": 20, "testing": 12, "review": 7, "security": 5, "repair": 8, "verification": 8}
@@ -74,7 +75,7 @@ def _checkpoint_phases(task: Task) -> tuple[list[dict[str, Any]], str | None, li
 
 
 class PhaseRunner:
-    """Execute the role pipeline with provider-diverse failover and resumable checkpoints."""
+    """Execute the dependency graph with provider-diverse failover and resumable checkpoints."""
 
     def __init__(self, router: SmartRouter, workspace: str, *, on_phase: Callable[[dict[str, Any]], None] | None = None):
         self.router = router
@@ -112,9 +113,8 @@ class PhaseRunner:
             extras[index] += 1
         return {role: minimum + extras[index] for index, role in enumerate(ROLE_ORDER)}
 
-    def _next_role(self, role: str) -> str:
-        index = ROLE_ORDER.index(role)
-        return ROLE_ORDER[index + 1] if index + 1 < len(ROLE_ORDER) else "repair"
+    def _next_role(self, role: str, completed_roles: set[str]) -> str | None:
+        return DEFAULT_PHASE_GRAPH.next_after(role, completed_roles)
 
     async def run(self, task: Task) -> dict[str, Any]:
         started = monotonic()
@@ -129,6 +129,8 @@ class PhaseRunner:
 
         for role in ROLE_ORDER:
             if role in completed_roles and role != active_role:
+                continue
+            if active_role and role != active_role and role not in completed_roles:
                 continue
             if monotonic() - started >= self.task_timeout:
                 return {"status": "checkpointed", "active_role": role, "checkpoint_reason": "timeout", "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
@@ -157,7 +159,10 @@ class PhaseRunner:
             if result.get("status") == "checkpointed":
                 reason = str(result.get("checkpoint_reason") or "timeout")
                 if reason == "step_budget":
-                    return {"status": "checkpointed", "active_role": self._next_role(role), "checkpoint_reason": "phase_budget_exhausted", "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": []}
+                    next_role = self._next_role(role, completed_roles)
+                    if next_role is None:
+                        return {"status": "checkpointed", "active_role": role, "checkpoint_reason": "phase_budget_exhausted", "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": []}
+                    return {"status": "checkpointed", "active_role": next_role, "checkpoint_reason": "phase_budget_exhausted", "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": []}
                 return {"status": "checkpointed", "active_role": role, "checkpoint_reason": reason, "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": redact_secrets(result.get("messages", []))}
             if result.get("status") != "completed":
                 return {"status": "failed", "error": f"{role} phase failed: {result.get('error', 'unknown error')}", "failed_phase": role, "phases": phases, "steps": total_steps, "repairs": total_repairs}
