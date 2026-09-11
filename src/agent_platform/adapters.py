@@ -162,10 +162,11 @@ class FailoverAdapter:
                 return response
             except Exception as exc:
                 last_error = exc
-                if self.on_failure:
-                    self.on_failure(endpoint_id, exc)
+                stop_failover = bool(self.on_failure(endpoint_id, exc)) if self.on_failure else False
                 if self.quarantine_on_failure:
                     self._quarantined.add(endpoint_id)
+                if stop_failover:
+                    break
         if self.quarantine_on_failure:
             raise ProviderFailoverExhausted(attempted or sorted(self._quarantined), last_error)
         raise last_error or RuntimeError("all model endpoints failed")
