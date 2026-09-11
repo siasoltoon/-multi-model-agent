@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from time import monotonic
 
@@ -92,29 +93,48 @@ class SmartRouter:
             quota = max(0.05, min(1.0, e.quota_remaining))
             speed = self._latency_score(e.latency_ms)
             billing = str(e.metadata.get("billing_type", "unknown")).lower() if isinstance(e.metadata, dict) else "unknown"
-            free_bonus = 1.18 if billing in {"free", "local"} else 1.0
-            return free_bonus * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
+            # Free endpoints are for development/testing. Prefer local and
+            # paid-capable endpoints for long-running production tasks so the
+            # router does not burn a tiny shared free-tier quota first.
+            billing_bonus = 1.10 if billing == "local" else (0.82 if billing == "free" else 1.0)
+            return billing_bonus * (fit ** 2) * (effective_role ** 2) * (reliability ** 2) * (0.65 + 0.35 * quota) * (0.75 + 0.25 * speed)
 
         return sorted(candidates, key=score, reverse=True)
 
     def choose(self, **kwargs) -> ModelEndpoint:
         return self.ranked(**kwargs)[0]
 
-    def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False) -> None:
+    def mark_failure(self, endpoint_id: str, error: Exception | str, *, rate_limited: bool = False, provider_quota_exhausted: bool = False) -> None:
         text = str(error).lower()
+        detected_quota = provider_quota_exhausted or any(
+            marker in text for marker in ("free-models-per-day", "daily quota", "daily limit", "quota exhausted", "quota_exceeded", "insufficient_quota", "billing limit")
+        )
         detected_rate_limit = rate_limited or any(
             marker in text for marker in ("429", "rate limit", "rate_limit", "too many requests", "quota")
         )
-        for e in self.endpoints:
-            if e.id == endpoint_id:
-                e.failures += 1
-                e.last_error_at = monotonic()
-                e.reliability = max(0.05, e.reliability * 0.85)
-                if detected_rate_limit:
-                    e.health = "RATE_LIMITED"
-                    e.cooldown_until = monotonic() + min(300.0, 15.0 * (2 ** min(e.failures - 1, 4)))
-                else:
-                    e.health = "DEGRADED" if e.failures < 3 else "ERROR"
+        failed = next((e for e in self.endpoints if e.id == endpoint_id), None)
+        if failed is None:
+            return
+        failed.failures += 1
+        failed.last_error_at = monotonic()
+        failed.reliability = max(0.05, failed.reliability * 0.85)
+        if detected_quota:
+            # A provider/account quota is shared by all models behind the same
+            # provider key. Quarantine every endpoint for that provider instead
+            # of wasting failover attempts on sibling models with the same key.
+            cooldown = max(60.0, float(os.getenv("AGENT_PROVIDER_QUOTA_COOLDOWN_SECONDS", "86400")))
+            until = monotonic() + cooldown
+            for endpoint in self.endpoints:
+                if endpoint.provider == failed.provider:
+                    endpoint.health = "QUOTA_EXHAUSTED"
+                    endpoint.quota_remaining = 0.0
+                    endpoint.cooldown_until = until
+            return
+        if detected_rate_limit:
+            failed.health = "RATE_LIMITED"
+            failed.cooldown_until = monotonic() + min(300.0, 15.0 * (2 ** min(failed.failures - 1, 4)))
+        else:
+            failed.health = "DEGRADED" if failed.failures < 3 else "ERROR"
 
     def mark_success(self, endpoint_id: str, *, latency_ms: float | None = None) -> None:
         for e in self.endpoints:
