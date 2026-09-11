@@ -64,6 +64,7 @@ class SubtaskExecutor:
         self.command_timeout = float(os.getenv("AGENT_COMMAND_TIMEOUT", "300"))
         self.max_retries = max(1, int(os.getenv("AGENT_SUBTASK_REPAIR_ATTEMPTS", "2")))
         self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "5")))
+        self.max_runtime = max(1.0, float(os.getenv("AGENT_SUBTASK_MAX_RUNTIME_SECONDS", "1800")))
 
     def _adapter(self, role: str):
         selected = self.router.ranked_provider_diverse(
@@ -99,7 +100,7 @@ class SubtaskExecutor:
             f"Dependencies:\n{self._context(dag, node)}\n\n"
             "Work only on this subtask. Preserve correct existing work and verify your result."
         )
-        loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=max(2, budget), repair_attempts=3, timeout_seconds=1800))
+        loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=budget, repair_attempts=3, timeout_seconds=self.max_runtime))
         result = await loop.run([{"role": "system", "content": system}, {"role": "user", "content": user}], tools.specs())
         active = next((e for e in selected if e.id == adapter.active_endpoint_id), selected[0])
         if result.get("status") == "completed":
@@ -137,10 +138,20 @@ class SubtaskExecutor:
                 return {"status": "completed", "dag": dag.to_dict(), "history": history, "steps": total_steps, "repairs": total_repairs, "completed_subtasks": completed}
 
             for node in ready:
-                if monotonic() - started >= 1800 or total_steps >= max_steps:
-                    return {"status": "checkpointed", "active_subtasks": [n.id for n in dag.ready()], "checkpoint_reason": "subtask_budget", "dag": dag.to_dict(), "history": history, "steps": total_steps, "repairs": total_repairs}
+                remaining_steps = max_steps - total_steps
+                if monotonic() - started >= self.max_runtime or remaining_steps < 2:
+                    return {
+                        "status": "checkpointed",
+                        "active_subtasks": [n.id for n in dag.ready()],
+                        "checkpoint_reason": "subtask_budget",
+                        "dag": dag.to_dict(),
+                        "history": history,
+                        "steps": total_steps,
+                        "repairs": total_repairs,
+                    }
+
                 remaining_nodes = max(1, len([n for n in dag.nodes.values() if n.status != "completed"]))
-                budget = max(2, (max_steps - total_steps) // remaining_nodes)
+                budget = max(2, min(remaining_steps, (remaining_steps + remaining_nodes - 1) // remaining_nodes))
                 result = await self._run_node(dag, node, tools, budget)
                 total_steps += result["steps"]
                 total_repairs += result["repairs"]
@@ -149,10 +160,23 @@ class SubtaskExecutor:
                     dag.mark_completed(node.id, result["summary"])
                     completed.append(node.id)
                     continue
+
                 repaired = False
                 for attempt in range(self.max_retries):
+                    remaining_steps = max_steps - total_steps
+                    if remaining_steps < 2 or monotonic() - started >= self.max_runtime:
+                        return {
+                            "status": "checkpointed",
+                            "active_subtasks": [node.id],
+                            "checkpoint_reason": "subtask_budget",
+                            "dag": dag.to_dict(),
+                            "history": history,
+                            "steps": total_steps,
+                            "repairs": total_repairs,
+                        }
                     node.attempts += 1
-                    repair = await self._run_node(dag, node, tools, max(2, budget // 2), repair=True)
+                    repair_budget = max(2, min(remaining_steps, max(2, budget // 2)))
+                    repair = await self._run_node(dag, node, tools, repair_budget, repair=True)
                     total_steps += repair["steps"]
                     total_repairs += repair["repairs"] + 1
                     history.append({"subtask": node.id, "repair_attempt": attempt + 1, **repair})
@@ -164,5 +188,3 @@ class SubtaskExecutor:
                 if not repaired:
                     dag.mark_failed(node.id, result.get("error") or "subtask execution failed")
                     return {"status": "failed", "failed_subtasks": [node.id], "dag": dag.to_dict(), "history": history, "steps": total_steps, "repairs": total_repairs}
-
-        
