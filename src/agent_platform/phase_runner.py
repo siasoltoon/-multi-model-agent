@@ -4,7 +4,7 @@ import os
 from time import monotonic
 from typing import Any, Callable
 
-from .adapters import FailoverAdapter, OpenAICompatibleAdapter
+from .adapters import FailoverAdapter, OpenAICompatibleAdapter, is_provider_quota_exhausted
 from .agent_loop import AgentLoop, AgentPolicy
 from .discovery import env_api_key
 from .models import Task
@@ -79,7 +79,6 @@ class PhaseRunner:
     def __init__(self, router: SmartRouter, workspace: str, *, on_phase: Callable[[dict[str, Any]], None] | None = None):
         self.router = router
         self.workspace = workspace
-        self.on_phase = on_phase
         self.request_timeout = float(os.getenv("AGENT_MODEL_REQUEST_TIMEOUT_SECONDS", os.getenv("AGENT_MODEL_REQUEST_TIMEOUT", "180")))
         self.command_timeout = float(os.getenv("AGENT_COMMAND_TIMEOUT", "300"))
         self.task_timeout = float(os.getenv("AGENT_TIMEOUT_SECONDS", "1800"))
@@ -90,9 +89,18 @@ class PhaseRunner:
         selected = ranked[: self.max_failover]
         if not selected:
             raise RuntimeError(f"no model endpoint available for role: {role}")
+
+        def on_failure(endpoint_id, error):
+            quota_exhausted = is_provider_quota_exhausted(error)
+            self.router.mark_failure(endpoint_id, error, provider_quota_exhausted=quota_exhausted)
+            # Do not try sibling models from the same account/provider after a
+            # provider-wide quota error. The next selected endpoint must be a
+            # genuinely different provider/key.
+            return quota_exhausted
+
         adapter = FailoverAdapter(
             [(e.id, _build_adapter(e, self.request_timeout)) for e in selected],
-            on_failure=lambda endpoint_id, error: self.router.mark_failure(endpoint_id, error),
+            on_failure=on_failure,
             quarantine_on_failure=True,
         )
         return adapter, selected
