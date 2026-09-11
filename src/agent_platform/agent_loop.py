@@ -49,11 +49,12 @@ class AgentLoop:
             try:
                 response: ModelResponse = await self.adapter.generate(model_history, tools=tool_specs)
             except ProviderFailoverExhausted as exc:
-                history.append({"role": "system", "content": f"Provider failover exhausted. Error: {exc}"})
+                history.append({"role": "system", "content": f"Free-provider pool exhausted. Checkpoint and resume when a zero-cost provider becomes available. Error: {exc}"})
                 return {
-                    "status": "failed",
+                    "status": "checkpointed",
                     "steps": steps,
                     "repairs": repairs,
+                    "checkpoint_reason": "free_provider_pool_exhausted",
                     "error": str(exc),
                     "provider_failover_exhausted": True,
                     "failed_endpoints": list(exc.endpoint_ids),
