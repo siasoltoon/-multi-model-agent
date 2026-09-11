@@ -20,10 +20,13 @@ class WorkerCandidate:
     endpoint: str = ""
     score: float = 0.0
     matched_capabilities: tuple[str, ...] = ()
+    active_tasks: int = 0
+    max_concurrent_tasks: int = 1
+    available_slots: int = 0
 
 
 class WorkerOrchestrator:
-    """Select a live execution target using capability-aware scheduling and failover."""
+    """Select a live execution target using capability, resource and load-aware scheduling."""
 
     _GITHUB_CAPABILITIES = {"coding", "testing", "tools", "github", "linux", "ci"}
 
@@ -57,6 +60,8 @@ class WorkerOrchestrator:
         worker_models = {model.lower() for model in worker.models}
         if models and not models.issubset(worker_models):
             return False, 0.0, matched
+        if worker.available_slots <= 0:
+            return False, 0.0, matched
 
         score = 100.0
         score += len(matched) * 10.0
@@ -68,20 +73,32 @@ class WorkerOrchestrator:
             score += 15.0
         if models:
             score += len(models) * 5.0
+        # Prefer workers with spare capacity and penalize saturated load.
+        score += worker.available_slots * 8.0
+        score -= worker.load_ratio * 30.0
         return True, score, matched
 
     def candidates(self, requirements: Mapping[str, Any] | None = None) -> list[WorkerCandidate]:
         live = self.registry.online()
         result: list[WorkerCandidate] = []
         for worker in live:
-            if worker.status != WorkerStatus.ONLINE:
+            if worker.status == WorkerStatus.OFFLINE:
                 continue
             fits, score, matched = self._fit(worker, requirements)
             if fits:
-                # Laptop remains the preferred class when capability fit is comparable.
-                priority = 10 if worker.kind == WorkerKind.LAPTOP else 15
-                score += 20.0 if worker.kind == WorkerKind.LAPTOP else 0.0
-                result.append(WorkerCandidate(WorkerKind.LAPTOP, worker.worker_id, priority, worker.endpoint, score, matched))
+                priority = 10 if worker.kind == WorkerKind.LAPTOP.value else 15
+                score += 20.0 if worker.kind == WorkerKind.LAPTOP.value else 0.0
+                result.append(WorkerCandidate(
+                    WorkerKind.LAPTOP if worker.kind == WorkerKind.LAPTOP.value else WorkerKind.GITHUB,
+                    worker.worker_id,
+                    priority,
+                    worker.endpoint,
+                    score,
+                    matched,
+                    worker.active_tasks,
+                    worker.max_concurrent_tasks,
+                    worker.available_slots,
+                ))
 
         if self.github_enabled:
             github_worker = Worker(
@@ -92,10 +109,11 @@ class WorkerOrchestrator:
                 memory_mb=None,
                 gpu=False,
                 models=[],
+                max_concurrent_tasks=256,
             )
             fits, score, matched = self._fit(github_worker, requirements)
             if fits:
-                result.append(WorkerCandidate(WorkerKind.GITHUB, "github-actions", 20, "", score, matched))
+                result.append(WorkerCandidate(WorkerKind.GITHUB, "github-actions", 20, "", score, matched, 0, 256, 256))
         return sorted(result, key=lambda item: (-item.score, item.priority, item.worker_id))
 
     def select(self, requirements: Mapping[str, Any] | None = None) -> WorkerCandidate | None:
