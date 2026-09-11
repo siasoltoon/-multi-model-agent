@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from .discovery import ProviderDiscovery
 from .models import Task
 from .router import ModelEndpoint, SmartRouter
@@ -32,8 +32,13 @@ async def main() -> int:
     task = Task(id=uuid4(), prompt=prompt, max_steps=int(os.getenv("AGENT_MAX_STEPS", "64")))
     task_id = os.getenv("AGENT_TASK_ID", "")
     if task_id:
-        from uuid import UUID
-        task.id = UUID(task_id)
+        try:
+            task.id = UUID(task_id)
+        except ValueError:
+            # Workflow/manual task IDs may be human-readable rather than UUIDs.
+            # Keep a deterministic UUID internally while the external task ID
+            # remains unchanged for callbacks and control-plane correlation.
+            task.id = uuid5(NAMESPACE_URL, f"multi-model-agent:task:{task_id}")
     checkpoint = os.getenv("AGENT_CHECKPOINT_JSON", "")
     if checkpoint:
         try:
