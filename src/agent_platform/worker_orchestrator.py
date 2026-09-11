@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Mapping, Any
 
-from .workers import WorkerRegistry, WorkerStatus
+from .workers import Worker, WorkerRegistry, WorkerStatus
 
 
 class WorkerKind(str, Enum):
@@ -17,31 +18,92 @@ class WorkerCandidate:
     worker_id: str
     priority: int
     endpoint: str = ""
+    score: float = 0.0
+    matched_capabilities: tuple[str, ...] = ()
 
 
 class WorkerOrchestrator:
-    """Select a live execution target using laptop-first failover."""
+    """Select a live execution target using capability-aware scheduling and failover."""
+
+    _GITHUB_CAPABILITIES = {"coding", "testing", "tools", "github", "linux", "ci"}
 
     def __init__(self, registry: WorkerRegistry, github_enabled: bool = True):
         self.registry = registry
         self.github_enabled = github_enabled
 
-    def candidates(self) -> list[WorkerCandidate]:
+    @staticmethod
+    def _requirements(requirements: Mapping[str, Any] | None) -> tuple[set[str], int | None, int | None, bool, set[str]]:
+        requirements = requirements or {}
+        capabilities = {str(x).strip().lower() for x in requirements.get("capabilities", []) if str(x).strip()}
+        min_cpu = requirements.get("min_cpu_cores")
+        min_memory = requirements.get("min_memory_mb")
+        gpu = bool(requirements.get("gpu", False))
+        models = {str(x).strip().lower() for x in requirements.get("models", []) if str(x).strip()}
+        return capabilities, int(min_cpu) if min_cpu is not None else None, int(min_memory) if min_memory is not None else None, gpu, models
+
+    @classmethod
+    def _fit(cls, worker: Worker, requirements: Mapping[str, Any] | None) -> tuple[bool, float, tuple[str, ...]]:
+        capabilities, min_cpu, min_memory, gpu, models = cls._requirements(requirements)
+        worker_capabilities = worker.capability_set()
+        matched = tuple(sorted(capabilities & worker_capabilities))
+        if not capabilities.issubset(worker_capabilities):
+            return False, 0.0, matched
+        if min_cpu is not None and (worker.cpu_cores is None or worker.cpu_cores < min_cpu):
+            return False, 0.0, matched
+        if min_memory is not None and (worker.memory_mb is None or worker.memory_mb < min_memory):
+            return False, 0.0, matched
+        if gpu and not worker.gpu:
+            return False, 0.0, matched
+        worker_models = {model.lower() for model in worker.models}
+        if models and not models.issubset(worker_models):
+            return False, 0.0, matched
+
+        score = 100.0
+        score += len(matched) * 10.0
+        if min_cpu and worker.cpu_cores:
+            score += min(worker.cpu_cores / min_cpu, 4.0) * 5.0
+        if min_memory and worker.memory_mb:
+            score += min(worker.memory_mb / min_memory, 4.0) * 5.0
+        if gpu and worker.gpu:
+            score += 15.0
+        if models:
+            score += len(models) * 5.0
+        return True, score, matched
+
+    def candidates(self, requirements: Mapping[str, Any] | None = None) -> list[WorkerCandidate]:
         live = self.registry.online()
         result: list[WorkerCandidate] = []
         for worker in live:
-            if worker.status == WorkerStatus.ONLINE:
-                result.append(WorkerCandidate(WorkerKind.LAPTOP, worker.worker_id, 10, worker.endpoint))
-        if self.github_enabled:
-            result.append(WorkerCandidate(WorkerKind.GITHUB, "github-actions", 20))
-        return sorted(result, key=lambda item: (item.priority, item.worker_id))
+            if worker.status != WorkerStatus.ONLINE:
+                continue
+            fits, score, matched = self._fit(worker, requirements)
+            if fits:
+                # Laptop remains the preferred class when capability fit is comparable.
+                priority = 10 if worker.kind == WorkerKind.LAPTOP else 15
+                score += 20.0 if worker.kind == WorkerKind.LAPTOP else 0.0
+                result.append(WorkerCandidate(WorkerKind.LAPTOP, worker.worker_id, priority, worker.endpoint, score, matched))
 
-    def select(self) -> WorkerCandidate | None:
-        candidates = self.candidates()
+        if self.github_enabled:
+            github_worker = Worker(
+                worker_id="github-actions",
+                kind=WorkerKind.GITHUB.value,
+                capabilities=sorted(self._GITHUB_CAPABILITIES),
+                cpu_cores=None,
+                memory_mb=None,
+                gpu=False,
+                models=[],
+            )
+            fits, score, matched = self._fit(github_worker, requirements)
+            if fits:
+                result.append(WorkerCandidate(WorkerKind.GITHUB, "github-actions", 20, "", score, matched))
+        return sorted(result, key=lambda item: (-item.score, item.priority, item.worker_id))
+
+    def select(self, requirements: Mapping[str, Any] | None = None) -> WorkerCandidate | None:
+        candidates = self.candidates(requirements)
         return candidates[0] if candidates else None
 
-    def select_laptop(self) -> WorkerCandidate | None:
-        for candidate in self.candidates():
+    def select_laptop(self, requirements: Mapping[str, Any] | None = None) -> WorkerCandidate | None:
+        for candidate in self.candidates(requirements):
             if candidate.kind == WorkerKind.LAPTOP:
                 return candidate
         return None
