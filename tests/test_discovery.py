@@ -2,7 +2,8 @@ import asyncio
 
 import httpx
 
-from agent_platform.discovery import ProviderDiscovery, ProviderSpec
+from agent_platform.discovery import BUILTIN_PROVIDERS, ProviderDiscovery, ProviderSpec
+from agent_platform.provider_api_catalog import CONTRACTS_BY_PROVIDER
 
 
 def test_builtin_provider_discovers_models_from_catalog(monkeypatch):
@@ -59,3 +60,12 @@ def test_provider_without_key_is_not_called(monkeypatch):
 
     monkeypatch.setattr(discovery, "_discover_openai_compatible", fail_if_called)
     assert asyncio.run(discovery.discover()) == []
+
+
+def test_builtin_discovery_urls_match_verified_api_contracts():
+    by_provider = {item.name: item for item in BUILTIN_PROVIDERS}
+    assert by_provider
+    for provider_id, contract in CONTRACTS_BY_PROVIDER.items():
+        spec = by_provider[provider_id]
+        assert spec.base_url == contract.base_url
+        assert spec.models_url == contract.base_url.rstrip("/") + contract.models_path
