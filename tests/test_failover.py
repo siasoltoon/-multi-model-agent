@@ -42,10 +42,16 @@ def test_failover_allows_later_recovery_retry_of_same_endpoint():
         [("only", provider)],
         on_failure=lambda endpoint_id, error: failures.append(endpoint_id),
     )
-    first = asyncio.run(adapter.generate([{"role": "user", "content": "hi"}]))
-    second = asyncio.run(adapter.generate([{"role": "user", "content": "retry"}]))
 
-    assert first.text == "recovered" if provider.calls > 1 else False
-    assert second.text == "recovered"
+    async def run():
+        try:
+            await adapter.generate([{"role": "user", "content": "first"}])
+        except RuntimeError:
+            pass
+        return await adapter.generate([{"role": "user", "content": "retry"}])
+
+    result = asyncio.run(run())
+
+    assert result.text == "recovered"
     assert provider.calls == 2
     assert failures == ["only"]
