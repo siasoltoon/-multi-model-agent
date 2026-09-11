@@ -1,0 +1,146 @@
+name: e2e-agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_prompt:
+        description: Small deterministic coding task for the full control-plane/worker lifecycle
+        required: true
+        type: string
+      repository:
+        description: Target repository containing agent-worker.yml
+        required: false
+        default: sia644434/multi-model-agent
+        type: string
+      base_branch:
+        description: Target base branch
+        required: false
+        default: main
+        type: string
+      max_steps:
+        description: Agent step budget
+        required: false
+        default: '32'
+        type: string
+      control_plane_url:
+        description: Public Railway control-plane URL
+        required: true
+        type: string
+      poll_seconds:
+        description: Poll interval
+        required: false
+        default: '10'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Create durable control-plane task
+        id: create
+        env:
+          CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+          TASK_PROMPT: ${{ inputs.task_prompt }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          MAX_STEPS: ${{ inputs.max_steps }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          base = os.environ['CONTROL_PLANE_URL'].rstrip('/')
+          metadata = {
+              'repository': os.environ['TARGET_REPOSITORY'],
+              'base_branch': os.environ['BASE_BRANCH'],
+              'e2e': True,
+          }
+          payload = {
+              'prompt': os.environ['TASK_PROMPT'],
+              'max_steps': int(os.environ['MAX_STEPS']),
+              'metadata': metadata,
+          }
+          request = urllib.request.Request(
+              base + '/api/tasks',
+              data=json.dumps(payload).encode(),
+              headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  task = json.loads(response.read().decode())
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(f'task creation failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
+          task_id = str(task.get('id') or '')
+          if not task_id:
+              raise SystemExit(f'control plane returned no task id: {task}')
+          print(f'created task: {task_id}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write(f'task_id={task_id}\n')
+          PY
+
+      - name: Dispatch durable task
+        env:
+          CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+          TASK_ID: ${{ steps.create.outputs.task_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = os.environ['CONTROL_PLANE_URL'].rstrip('/') + '/api/tasks/' + os.environ['TASK_ID'] + '/dispatch'
+          request = urllib.request.Request(url, data=b'{}', headers={'Content-Type': 'application/json'}, method='POST')
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(response.read().decode())
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(f'task dispatch failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
+          PY
+
+      - name: Watch complete lifecycle
+        env:
+          CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+          TASK_ID: ${{ steps.create.outputs.task_id }}
+          POLL_SECONDS: ${{ inputs.poll_seconds }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = os.environ['CONTROL_PLANE_URL'].rstrip('/')
+          task_id = os.environ['TASK_ID']
+          interval = max(2, int(os.environ['POLL_SECONDS']))
+          deadline = time.time() + 330 * 60
+          last = None
+
+          while time.time() < deadline:
+              request = urllib.request.Request(base + '/api/tasks/' + task_id, headers={'Accept': 'application/json'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      task = json.loads(response.read().decode())
+              except urllib.error.HTTPError as exc:
+                  raise SystemExit(f'task polling failed: HTTP {exc.code}: {exc.read().decode(errors="replace")}') from exc
+              state = (task.get('status'), task.get('current_step'), task.get('attempts'), task.get('repair_attempts'), task.get('error'))
+              if state != last:
+                  print(f'status={state[0]} step={state[1]} worker_attempts={state[2]} repairs={state[3]} error={state[4]}')
+                  last = state
+              if state[0] in {'completed', 'failed', 'cancelled'}:
+                  if state[0] != 'completed':
+                      raise SystemExit(f'E2E task did not complete: {json.dumps(task, ensure_ascii=False, default=str)}')
+                  print('E2E lifecycle completed successfully')
+                  break
+              time.sleep(interval)
+          else:
+              raise SystemExit('E2E task timed out while waiting for a terminal state')
+          PY
