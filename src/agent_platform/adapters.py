@@ -38,13 +38,13 @@ class OpenAICompatibleAdapter:
         self.model = model
         self.timeout = timeout
         self.retry_policy = retry_policy or RetryPolicy()
-        # OpenRouter/free-tier accounts can reject requests that implicitly reserve
-        # the model's full output context. Keep the default bounded and configurable.
+        # Keep both OpenAI token fields bounded. Some newer/reasoning-compatible
+        # gateways use max_completion_tokens instead of max_tokens.
         try:
             configured = int(os.getenv("AGENT_MODEL_MAX_TOKENS", "2048"))
         except ValueError:
             configured = 2048
-        self.max_tokens = max(256, min(configured, 8192))
+        self.max_tokens = max(256, min(configured, 4096))
 
     async def _request(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         last_error: Exception | None = None
@@ -84,7 +84,12 @@ class OpenAICompatibleAdapter:
         raise last_error or RuntimeError("model request failed")
 
     async def generate(self, messages, *, tools=None) -> ModelResponse:
-        payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "max_completion_tokens": self.max_tokens,
+        }
         if tools:
             payload["tools"] = tools
         headers = {"Content-Type": "application/json"}
