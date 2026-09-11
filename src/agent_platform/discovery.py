@@ -98,6 +98,7 @@ class ProviderDiscovery:
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
         allow_paid_openrouter = os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+        explicit_free_openrouter = False
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
@@ -111,6 +112,8 @@ class ProviderDiscovery:
             openrouter_free = spec.name == "openrouter" and model.endswith(":free")
             if spec.name == "openrouter" and not openrouter_free and not allow_paid_openrouter:
                 continue
+            if openrouter_free:
+                explicit_free_openrouter = True
             context = int(item.get("context_length") or item.get("context_window") or (registry.default_context_window if registry else 32768))
             supported = item.get("supported_parameters") or []
             tool_support = "tools" in supported or "tool_choice" in supported or not supported
@@ -135,6 +138,27 @@ class ProviderDiscovery:
                 api_key_env=spec.api_key_env,
                 source=spec.models_url,
                 metadata=metadata,
+            ))
+        # Some OpenRouter accounts/catalog responses do not expose the free
+        # router as a normal :free model. Keep a deterministic zero-credit
+        # fallback so an empty/partial catalog cannot accidentally select a
+        # paid or ambiguous model. This is only added when paid OpenRouter
+        # models are not explicitly enabled and no explicit :free model was
+        # discovered.
+        if spec.name == "openrouter" and not allow_paid_openrouter and not explicit_free_openrouter:
+            result.append(DiscoveredEndpoint(
+                provider="openrouter",
+                model=os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free",
+                base_url=spec.base_url,
+                context_window=32768,
+                tool_support=True,
+                task_fit=0.8,
+                reliability=0.8,
+                latency_ms=1000.0,
+                billing_type="free",
+                api_key_env=spec.api_key_env,
+                source="openrouter:free-fallback",
+                metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
             ))
         return result
 
