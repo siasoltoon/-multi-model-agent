@@ -82,12 +82,11 @@ def test_agent_loop_checkpoints_when_step_budget_is_exhausted(tmp_path):
 def test_agent_loop_checkpoints_on_timeout_with_distinct_reason(tmp_path):
     class SlowAdapter:
         async def generate(self, messages, *, tools=None):
-            await asyncio.sleep(0.01)
             return ModelResponse("done", {}, {}, [])
 
     async def run():
         tools = WorkspaceTools(str(tmp_path))
-        return await AgentLoop(SlowAdapter(), tools.as_tools(), AgentPolicy(max_steps=4, timeout_seconds=0.001)).run(
+        return await AgentLoop(SlowAdapter(), tools.as_tools(), AgentPolicy(max_steps=4, timeout_seconds=0.0)).run(
             [{"role": "user", "content": "finish"}], tools.specs()
         )
 
