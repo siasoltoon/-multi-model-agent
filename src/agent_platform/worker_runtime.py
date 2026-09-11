@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import socket
+from contextlib import suppress
 from pathlib import Path
 
 import httpx
