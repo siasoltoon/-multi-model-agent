@@ -126,6 +126,7 @@ jobs:
           git push --set-upstream origin "$WORKING_BRANCH"
       - name: Open or update PR
         if: steps.result.outputs.status == 'completed' || steps.result.outputs.status == 'checkpointed'
+        continue-on-error: true
         working-directory: workspace
         env:
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN || github.token }}
