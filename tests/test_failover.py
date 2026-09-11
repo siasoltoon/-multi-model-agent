@@ -23,3 +23,29 @@ def test_failover_switches_provider_after_failure():
     assert result.text == "ok"
     assert adapter.active_endpoint_id == "good"
     assert failures == ["bad"]
+
+
+def test_failover_allows_later_recovery_retry_of_same_endpoint():
+    class RecoveringAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, messages, *, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary gateway failure")
+            return ModelResponse("recovered", {}, {}, [])
+
+    failures = []
+    provider = RecoveringAdapter()
+    adapter = FailoverAdapter(
+        [("only", provider)],
+        on_failure=lambda endpoint_id, error: failures.append(endpoint_id),
+    )
+    first = asyncio.run(adapter.generate([{"role": "user", "content": "hi"}]))
+    second = asyncio.run(adapter.generate([{"role": "user", "content": "retry"}]))
+
+    assert first.text == "recovered" if provider.calls > 1 else False
+    assert second.text == "recovered"
+    assert provider.calls == 2
+    assert failures == ["only"]
