@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       task_id:
-        description: Control-plane task UUID or external task identifier
+        description: Existing control-plane task UUID (must already exist)
         required: true
         type: string
       task_prompt:
@@ -48,6 +48,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
+      - name: Validate control-plane task
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from uuid import UUID
+
+          task_id = os.environ['TASK_ID']
+          try:
+              UUID(task_id)
+          except ValueError as exc:
+              raise SystemExit('task_id must be an existing control-plane UUID; create the task first instead of using an arbitrary external identifier') from exc
+
+          url = os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + task_id
+          request = urllib.request.Request(url, headers={'Accept': 'application/json'})
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  task = json.loads(response.read().decode('utf-8'))
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(f'control-plane task preflight failed: HTTP {exc.code}') from exc
+          except Exception as exc:
+              raise SystemExit(f'control-plane task preflight failed: {exc}') from exc
+
+          if str(task.get('id')) != task_id:
+              raise SystemExit('control-plane returned a different task id')
+          if task.get('status') in {'completed', 'cancelled'}:
+              raise SystemExit(f'control-plane task is not runnable: {task.get("status")}')
+          print(f'control-plane task verified: {task_id} status={task.get("status")}')
+          PY
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -68,9 +102,6 @@ jobs:
         run: |
           git fetch origin --prune
           if [ -z "${CHECKPOINT_JSON//[[:space:]]/}" ]; then
-            # A fresh task always starts from the requested base. If a stale
-            # persistent branch already exists, replace it atomically with the
-            # base commit so the next agent never inherits old task changes.
             git checkout -B "$WORKING_BRANCH" "origin/$BASE_BRANCH"
             if git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
               git push --force-with-lease origin "HEAD:$WORKING_BRANCH"
@@ -78,10 +109,8 @@ jobs:
               git push --set-upstream origin "$WORKING_BRANCH"
             fi
           elif git show-ref --verify --quiet "refs/remotes/origin/$WORKING_BRANCH"; then
-            # A checkpointed execution resumes the exact persistent branch.
             git checkout -B "$WORKING_BRANCH" "origin/$WORKING_BRANCH"
           else
-            # A checkpoint without an existing branch is recoverable from base.
             git checkout -B "$WORKING_BRANCH" "origin/$BASE_BRANCH"
           fi
       - name: Install agent
@@ -151,10 +180,6 @@ jobs:
           WORKING_BRANCH: ${{ inputs.working_branch }}
           BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
-          # The default GITHUB_TOKEN is intentionally not used to create PRs:
-          # many repositories/orgs block Actions from creating pull requests.
-          # Branch progress is already pushed above, so absence of a dedicated
-          # token is a successful, non-error outcome rather than a red step.
           if [ -z "${AGENT_GITHUB_TOKEN:-}" ]; then
             echo 'Skipping PR creation: AGENT_GITHUB_TOKEN is not configured.'
             exit 0
@@ -174,8 +199,7 @@ jobs:
           WORKER_ID: github-actions-${{ github.run_id }}
         run: |
           python - <<'PY'
-          import hashlib, hmac, json, os, time, urllib.request
-          from uuid import NAMESPACE_URL, UUID, uuid5
+          import hashlib, hmac, json, os, time, urllib.error, urllib.request
 
           path = os.path.join(os.environ['GITHUB_WORKSPACE'], 'workspace', '.agent-result.json')
           if os.path.exists(path):
@@ -184,35 +208,43 @@ jobs:
           else:
               payload = {'status': 'failed', 'error': 'worker ended before producing a result'}
 
-          external_task_id = os.environ['TASK_ID']
-          try:
-              callback_task_id = str(UUID(external_task_id))
-          except ValueError:
-              callback_task_id = str(uuid5(NAMESPACE_URL, f'multi-model-agent:task:{external_task_id}'))
-
+          task_id = os.environ['TASK_ID']
           payload.update({
-              'task_id': callback_task_id,
-              'external_task_id': external_task_id,
+              'task_id': task_id,
               'run_id': os.environ['RUN_ID'],
               'worker_id': os.environ['WORKER_ID'],
               'attempt': int(os.environ['ATTEMPT']),
           })
           data = json.dumps(payload, ensure_ascii=False, default=str, separators=(',', ':')).encode()
-          timestamp = str(int(time.time()))
           secret = os.environ.get('CALLBACK_TOKEN', '')
-          signature = 'sha256=' + hmac.new(secret.encode(), timestamp.encode() + b'.' + data, hashlib.sha256).hexdigest() if secret else ''
           headers = {'Content-Type': 'application/json'}
-          if secret:
-              headers.update({'X-Agent-Timestamp': timestamp, 'X-Agent-Signature': signature})
-          request = urllib.request.Request(
-              os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + callback_task_id + '/worker-callback',
-              data=data,
-              headers=headers,
-              method='POST',
-          )
-          try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  print(response.read().decode())
-          except Exception as exc:
-              print('callback warning:', exc)
+
+          last_error = None
+          for attempt in range(1, 4):
+              timestamp = str(int(time.time()))
+              request_headers = dict(headers)
+              if secret:
+                  signature = hmac.new(secret.encode(), timestamp.encode() + b'.' + data, hashlib.sha256).hexdigest()
+                  request_headers.update({'X-Agent-Timestamp': timestamp, 'X-Agent-Signature': 'sha256=' + signature})
+              request = urllib.request.Request(
+                  os.environ['CALLBACK_URL'].rstrip('/') + '/api/tasks/' + task_id + '/worker-callback',
+                  data=data,
+                  headers=request_headers,
+                  method='POST',
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      print(response.read().decode())
+                      raise SystemExit(0)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode(errors='replace')
+                  if 400 <= exc.code < 500:
+                      raise SystemExit(f'control-plane callback rejected: HTTP {exc.code}: {body}') from exc
+                  last_error = f'HTTP {exc.code}: {body}'
+              except Exception as exc:
+                  last_error = str(exc)
+              if attempt < 3:
+                  time.sleep(2 ** attempt)
+
+          raise SystemExit(f'control-plane callback failed after retries: {last_error}')
           PY
