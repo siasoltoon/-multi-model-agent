@@ -86,7 +86,7 @@ class ProviderDiscovery:
             except Exception:
                 continue
         found.extend(await self._discover_ollama())
-        return self._dedupe(found)
+        return self._finalize(found)
 
     async def _discover_openai_compatible(self, spec: ProviderSpec, api_key: str) -> list[DiscoveredEndpoint]:
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -97,7 +97,7 @@ class ProviderDiscovery:
         items = data.get("data", []) if isinstance(data, dict) else data
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
-        allow_paid_openrouter = os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+        allow_paid_openrouter = _allow_paid_openrouter()
         explicit_free_openrouter = False
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
@@ -105,11 +105,7 @@ class ProviderDiscovery:
             model = str(item["id"])
             pricing = item.get("pricing")
             is_free = _is_free_pricing(pricing)
-            # OpenRouter's pricing metadata is not sufficient to prove that a
-            # model is usable on a zero-credit account. A real free-tier model
-            # is explicitly exposed with the :free suffix. Prefer that signal
-            # and never silently select a billable/credit-consuming model.
-            openrouter_free = spec.name == "openrouter" and model.endswith(":free")
+            openrouter_free = spec.name == "openrouter" and _is_free_openrouter_model(model)
             if spec.name == "openrouter" and not openrouter_free and not allow_paid_openrouter:
                 continue
             if openrouter_free:
@@ -139,27 +135,8 @@ class ProviderDiscovery:
                 source=spec.models_url,
                 metadata=metadata,
             ))
-        # Some OpenRouter accounts/catalog responses do not expose the free
-        # router as a normal :free model. Keep a deterministic zero-credit
-        # fallback so an empty/partial catalog cannot accidentally select a
-        # paid or ambiguous model. This is only added when paid OpenRouter
-        # models are not explicitly enabled and no explicit :free model was
-        # discovered.
         if spec.name == "openrouter" and not allow_paid_openrouter and not explicit_free_openrouter:
-            result.append(DiscoveredEndpoint(
-                provider="openrouter",
-                model=os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free",
-                base_url=spec.base_url,
-                context_window=32768,
-                tool_support=True,
-                task_fit=0.8,
-                reliability=0.8,
-                latency_ms=1000.0,
-                billing_type="free",
-                api_key_env=spec.api_key_env,
-                source="openrouter:free-fallback",
-                metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
-            ))
+            result.append(self._openrouter_free_fallback(spec))
         return result
 
     async def _load_catalog(self, url: str) -> list[DiscoveredEndpoint]:
@@ -176,11 +153,19 @@ class ProviderDiscovery:
             models = item.get("models") or [item.get("model")]
             if not base or not models:
                 continue
+            provider = str(item.get("provider", "unknown"))
             for model in models:
                 if not model:
                     continue
+                model_name = str(model)
+                # Catalogs are external configuration and therefore cannot
+                # bypass the zero-credit OpenRouter safety policy. This also
+                # protects against stale Railway/provider catalogs reintroducing
+                # a paid model after live discovery has correctly filtered it.
+                if provider == "openrouter" and not _allow_paid_openrouter() and not _is_free_openrouter_model(model_name):
+                    continue
                 result.append(DiscoveredEndpoint(
-                    provider=str(item.get("provider", "unknown")), model=str(model), base_url=str(base),
+                    provider=provider, model=model_name, base_url=str(base),
                     context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)),
                     task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)),
                     latency_ms=float(item.get("latency_ms", 1000)), billing_type=str(item.get("billing_type", "unknown")),
@@ -204,6 +189,17 @@ class ProviderDiscovery:
         ) for item in data.get("models", []) if item.get("name")]
 
     @staticmethod
+    def _openrouter_free_fallback(spec: ProviderSpec) -> DiscoveredEndpoint:
+        model = os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free"
+        return DiscoveredEndpoint(
+            provider="openrouter", model=model, base_url=spec.base_url,
+            context_window=32768, tool_support=True, task_fit=0.8,
+            reliability=0.8, latency_ms=1000.0, billing_type="free",
+            api_key_env=spec.api_key_env, source="openrouter:free-fallback",
+            metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
+        )
+
+    @staticmethod
     def _dedupe(items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
         seen: set[tuple[str, str, str]] = set()
         result = []
@@ -213,6 +209,43 @@ class ProviderDiscovery:
                 seen.add(key)
                 result.append(item)
         return result
+
+    @classmethod
+    def _finalize(cls, items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
+        """Apply provider safety policy after every discovery source is merged."""
+        if _allow_paid_openrouter():
+            return cls._dedupe(items)
+        filtered = [
+            item for item in items
+            if item.provider != "openrouter" or _is_free_openrouter_model(item.model)
+        ]
+        if not any(item.provider == "openrouter" for item in filtered):
+            spec = next((item for item in cls.__dict__.get("BUILTIN_PROVIDERS", ()) if item.name == "openrouter"), None)
+            base_url = "https://openrouter.ai/api/v1"
+            api_key_env = "OPENROUTER_API_KEY"
+            if spec:
+                base_url = spec.base_url
+                api_key_env = spec.api_key_env
+            filtered.append(DiscoveredEndpoint(
+                provider="openrouter",
+                model=os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free",
+                base_url=base_url,
+                context_window=32768,
+                tool_support=True,
+                billing_type="free",
+                api_key_env=api_key_env,
+                source="openrouter:free-fallback",
+                metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
+            ))
+        return cls._dedupe(filtered)
+
+
+def _allow_paid_openrouter() -> bool:
+    return os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_free_openrouter_model(model: str) -> bool:
+    return model == "openrouter/free" or model.endswith(":free")
 
 
 def _is_free_pricing(pricing: Any) -> bool:
