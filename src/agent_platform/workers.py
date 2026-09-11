@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import Iterable
 from pydantic import BaseModel, Field
 
 
@@ -81,6 +82,27 @@ class WorkerRegistry:
             w.status = WorkerStatus.BUSY if w.active_tasks else WorkerStatus.ONLINE
         w.last_heartbeat = datetime.now(timezone.utc)
         return w
+
+    def reconcile_active_tasks(self, tasks: Iterable[object]) -> None:
+        """Rebuild runtime load from durable task assignments.
+
+        This makes scheduler capacity self-healing after process restarts and
+        keeps the in-memory registry aligned with the task store, which is the
+        source of truth for active execution ownership.
+        """
+        counts = {worker_id: 0 for worker_id in self.workers}
+        for task in tasks:
+            status = getattr(task, "status", None)
+            status_value = getattr(status, "value", status)
+            if status_value != "running":
+                continue
+            worker_id = str(getattr(task, "worker_id", None) or "")
+            if worker_id in counts:
+                counts[worker_id] += 1
+        for worker_id, worker in self.workers.items():
+            worker.active_tasks = min(worker.max_concurrent_tasks, counts[worker_id])
+            if worker.status != WorkerStatus.OFFLINE:
+                worker.status = WorkerStatus.BUSY if worker.active_tasks else WorkerStatus.ONLINE
 
     def mark_stale(self, timeout_seconds: int = 90) -> list[str]:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, timeout_seconds))
