@@ -85,27 +85,16 @@ class PhaseRunner:
         self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "5")))
 
     def _adapter(self, role: str):
-        selected = self.router.ranked_provider_diverse(
-            min_context=4096,
-            tools=ROLE_TOOLING[role],
-            task_type=ROLE_TASK_TYPES[role],
-            role=role,
-            max_providers=self.max_failover,
-        )
+        selected = self.router.ranked_provider_diverse(min_context=4096, tools=ROLE_TOOLING[role], task_type=ROLE_TASK_TYPES[role], role=role, max_providers=self.max_failover)
         if not selected:
             raise RuntimeError(f"no model endpoint available for role: {role}")
 
         def on_failure(endpoint_id, error):
             quota_exhausted = is_provider_quota_exhausted(error)
             self.router.mark_failure(endpoint_id, error, provider_quota_exhausted=quota_exhausted)
-            return quota_exhausted
+            return False
 
-        adapter = FailoverAdapter(
-            [(e.id, _build_adapter(e, self.request_timeout)) for e in selected],
-            on_failure=on_failure,
-            quarantine_on_failure=True,
-        )
-        return adapter, selected
+        return FailoverAdapter([(e.id, _build_adapter(e, self.request_timeout)) for e in selected], on_failure=on_failure, quarantine_on_failure=True), selected
 
     def _budgets(self, total: int) -> dict[str, int]:
         total = max(32, int(total))
@@ -114,16 +103,12 @@ class PhaseRunner:
             if sum(values.values()) != 32:
                 raise AssertionError("invalid 32-step role budget")
             return values
-
         minimum = 3
         remaining = total - minimum * len(ROLE_ORDER)
         weights = [ROLE_WEIGHTS[role] for role in ROLE_ORDER]
-        weight_sum = sum(weights)
-        raw = [remaining * weight / weight_sum for weight in weights]
+        raw = [remaining * weight / sum(weights) for weight in weights]
         extras = [int(value) for value in raw]
-        remainder = remaining - sum(extras)
-        order = sorted(range(len(ROLE_ORDER)), key=lambda index: raw[index] - extras[index], reverse=True)
-        for index in order[:remainder]:
+        for index in sorted(range(len(ROLE_ORDER)), key=lambda i: raw[i] - extras[i], reverse=True)[:remaining - sum(extras)]:
             extras[index] += 1
         return {role: minimum + extras[index] for index, role in enumerate(ROLE_ORDER)}
 
@@ -148,13 +133,10 @@ class PhaseRunner:
             if monotonic() - started >= self.task_timeout:
                 return {"status": "checkpointed", "active_role": role, "checkpoint_reason": "timeout", "error": "multi-model phase pipeline timed out", "phases": phases, "steps": total_steps, "repairs": total_repairs}
             adapter, selected = self._adapter(role)
-            if role == active_role and resume_messages:
-                messages = resume_messages
-            else:
-                messages = [
-                    {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + TOOL_GRAMMAR + " Never claim completion without evidence."},
-                    {"role": "user", "content": _phase_context(task, role, prior)},
-                ]
+            messages = resume_messages if role == active_role and resume_messages else [
+                {"role": "system", "content": "You are one specialist in an automatic multi-model software engineering pipeline. " + ROLE_INSTRUCTIONS[role] + TOOL_GRAMMAR + " Never claim completion without evidence."},
+                {"role": "user", "content": _phase_context(task, role, prior)},
+            ]
             loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=budgets[role], repair_attempts=6, timeout_seconds=self.task_timeout))
             phase_started = monotonic()
             result = await loop.run(messages, tools.specs())
@@ -162,14 +144,9 @@ class PhaseRunner:
             active = next((e for e in selected if e.id == adapter.active_endpoint_id), selected[0])
             if result.get("status") == "completed":
                 self.router.mark_success(active.id, latency_ms=elapsed_ms)
-            else:
+            elif not result.get("provider_failover_exhausted"):
                 self.router.mark_failure(active.id, result.get("error", f"{role} phase failed"))
-            record = {
-                "role": role, "status": result.get("status"), "checkpoint_reason": result.get("checkpoint_reason"),
-                "model": active.model, "provider": active.provider,
-                "steps": result.get("steps", 0), "repairs": result.get("repairs", 0), "latency_ms": round(elapsed_ms, 2),
-                "summary": _summary(result),
-            }
+            record = {"role": role, "status": result.get("status"), "checkpoint_reason": result.get("checkpoint_reason"), "model": active.model, "provider": active.provider, "steps": result.get("steps", 0), "repairs": result.get("repairs", 0), "latency_ms": round(elapsed_ms, 2), "summary": _summary(result)}
             phases = [p for p in phases if p.get("role") != role]
             phases.append(record)
             prior = list(phases)
@@ -180,15 +157,8 @@ class PhaseRunner:
             if result.get("status") == "checkpointed":
                 reason = str(result.get("checkpoint_reason") or "timeout")
                 if reason == "step_budget":
-                    return {
-                        "status": "checkpointed", "active_role": self._next_role(role), "checkpoint_reason": "phase_budget_exhausted",
-                        "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": [],
-                    }
-                return {
-                    "status": "checkpointed", "active_role": role, "checkpoint_reason": reason,
-                    "phases": phases, "steps": total_steps, "repairs": total_repairs,
-                    "messages": redact_secrets(result.get("messages", [])),
-                }
+                    return {"status": "checkpointed", "active_role": self._next_role(role), "checkpoint_reason": "phase_budget_exhausted", "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": []}
+                return {"status": "checkpointed", "active_role": role, "checkpoint_reason": reason, "phases": phases, "steps": total_steps, "repairs": total_repairs, "messages": redact_secrets(result.get("messages", []))}
             if result.get("status") != "completed":
                 return {"status": "failed", "error": f"{role} phase failed: {result.get('error', 'unknown error')}", "failed_phase": role, "phases": phases, "steps": total_steps, "repairs": total_repairs}
             completed_roles.add(role)
