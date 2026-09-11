@@ -104,9 +104,12 @@ class ProviderDiscovery:
             model = str(item["id"])
             pricing = item.get("pricing")
             is_free = _is_free_pricing(pricing)
-            # On OpenRouter, an account may have no usable paid balance. Prefer
-            # genuinely free models and do not select paid models unless explicitly enabled.
-            if spec.name == "openrouter" and not is_free and not allow_paid_openrouter:
+            # OpenRouter's pricing metadata is not sufficient to prove that a
+            # model is usable on a zero-credit account. A real free-tier model
+            # is explicitly exposed with the :free suffix. Prefer that signal
+            # and never silently select a billable/credit-consuming model.
+            openrouter_free = spec.name == "openrouter" and model.endswith(":free")
+            if spec.name == "openrouter" and not openrouter_free and not allow_paid_openrouter:
                 continue
             context = int(item.get("context_length") or item.get("context_window") or (registry.default_context_window if registry else 32768))
             supported = item.get("supported_parameters") or []
@@ -119,8 +122,9 @@ class ProviderDiscovery:
                 "pricing": pricing,
                 "registry": registry.to_metadata() if registry else {},
                 "api_verified": True,
+                "billing_type": "free" if (openrouter_free or is_free) else (registry.billing_type if registry else "unknown"),
             }
-            billing_type = "free" if is_free else (registry.billing_type if registry and registry.billing_type != "unknown" else "paid_or_unknown")
+            billing_type = "free" if (openrouter_free or is_free) else (registry.billing_type if registry and registry.billing_type != "unknown" else "paid_or_unknown")
             result.append(DiscoveredEndpoint(
                 provider=spec.name,
                 model=model,
