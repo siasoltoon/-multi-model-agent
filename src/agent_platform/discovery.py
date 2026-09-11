@@ -12,8 +12,6 @@ from .provider_registry import PROVIDER_REGISTRY
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """Backwards-compatible provider discovery specification."""
-
     name: str
     models_url: str
     base_url: str
@@ -23,21 +21,9 @@ class ProviderSpec:
 
 _registry_by_id = {item.provider_id: item for item in PROVIDER_REGISTRY}
 BUILTIN_PROVIDERS: tuple[ProviderSpec, ...] = tuple(
-    ProviderSpec(
-        contract.provider_id,
-        contract.base_url.rstrip("/") + contract.models_path,
-        contract.base_url,
-        (_registry_by_id[contract.provider_id].api_key_env or ""),
-        contract.auth_scheme,
-    )
+    ProviderSpec(contract.provider_id, contract.base_url.rstrip("/") + contract.models_path, contract.base_url, (_registry_by_id[contract.provider_id].api_key_env or ""), contract.auth_scheme)
     for contract in VERIFIED_PROVIDER_APIS
-    if (
-        contract.verified
-        and contract.provider_id in _registry_by_id
-        and _registry_by_id[contract.provider_id].api_key_env
-        and _registry_by_id[contract.provider_id].openai_compatible
-        and is_api_verified(contract.provider_id)
-    )
+    if contract.verified and contract.provider_id in _registry_by_id and _registry_by_id[contract.provider_id].api_key_env and _registry_by_id[contract.provider_id].openai_compatible and is_api_verified(contract.provider_id)
 )
 
 
@@ -58,7 +44,7 @@ class DiscoveredEndpoint:
 
 
 class ProviderDiscovery:
-    """Discover configured providers from the central registry plus local Ollama."""
+    """Discover providers while enforcing a hard zero-cost policy."""
 
     def __init__(self, catalog_urls: list[str] | None = None, timeout: float = 15.0, providers: tuple[ProviderSpec, ...] = BUILTIN_PROVIDERS):
         self.catalog_urls = catalog_urls if catalog_urls is not None else self._env_catalogs()
@@ -97,7 +83,6 @@ class ProviderDiscovery:
         items = data.get("data", []) if isinstance(data, dict) else data
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
-        allow_paid_openrouter = _allow_paid_openrouter()
         explicit_free_openrouter = False
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
@@ -106,7 +91,7 @@ class ProviderDiscovery:
             pricing = item.get("pricing")
             is_free = _is_free_pricing(pricing)
             openrouter_free = spec.name == "openrouter" and _is_free_openrouter_model(model)
-            if spec.name == "openrouter" and not openrouter_free and not allow_paid_openrouter:
+            if not (openrouter_free or is_free):
                 continue
             if openrouter_free:
                 explicit_free_openrouter = True
@@ -121,21 +106,12 @@ class ProviderDiscovery:
                 "pricing": pricing,
                 "registry": registry.to_metadata() if registry else {},
                 "api_verified": True,
-                "billing_type": "free" if (openrouter_free or is_free) else (registry.billing_type if registry else "unknown"),
+                "billing_type": "free",
+                "free_status": "verified" if is_free or openrouter_free else "unknown",
+                "zero_cost_verified": True,
             }
-            billing_type = "free" if (openrouter_free or is_free) else (registry.billing_type if registry and registry.billing_type != "unknown" else "paid_or_unknown")
-            result.append(DiscoveredEndpoint(
-                provider=spec.name,
-                model=model,
-                base_url=spec.base_url,
-                context_window=context,
-                tool_support=tool_support,
-                billing_type=billing_type,
-                api_key_env=spec.api_key_env,
-                source=spec.models_url,
-                metadata=metadata,
-            ))
-        if spec.name == "openrouter" and not allow_paid_openrouter and not explicit_free_openrouter:
+            result.append(DiscoveredEndpoint(provider=spec.name, model=model, base_url=spec.base_url, context_window=context, tool_support=tool_support, billing_type="free", api_key_env=spec.api_key_env, source=spec.models_url, metadata=metadata))
+        if spec.name == "openrouter" and not explicit_free_openrouter:
             result.append(self._openrouter_free_fallback(spec))
         return result
 
@@ -154,23 +130,21 @@ class ProviderDiscovery:
             if not base or not models:
                 continue
             provider = str(item.get("provider", "unknown"))
+            billing_type = str(item.get("billing_type", "unknown")).strip().lower()
+            metadata = item.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
             for model in models:
                 if not model:
                     continue
                 model_name = str(model)
-                # Catalogs are external configuration and therefore cannot
-                # bypass the zero-credit OpenRouter safety policy. This also
-                # protects against stale Railway/provider catalogs reintroducing
-                # a paid model after live discovery has correctly filtered it.
-                if provider == "openrouter" and not _allow_paid_openrouter() and not _is_free_openrouter_model(model_name):
+                if provider == "openrouter" and not _is_free_openrouter_model(model_name):
                     continue
-                result.append(DiscoveredEndpoint(
-                    provider=provider, model=model_name, base_url=str(base),
-                    context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)),
-                    task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)),
-                    latency_ms=float(item.get("latency_ms", 1000)), billing_type=str(item.get("billing_type", "unknown")),
-                    api_key_env=item.get("api_key_env"), source=url, metadata=item.get("metadata", {}),
-                ))
+                if not _catalog_item_is_zero_cost(billing_type, metadata):
+                    continue
+                catalog_metadata = dict(metadata)
+                catalog_metadata.update({"billing_type": "local" if billing_type == "local" else "free", "zero_cost_verified": True})
+                result.append(DiscoveredEndpoint(provider=provider, model=model_name, base_url=str(base), context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)), task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)), latency_ms=float(item.get("latency_ms", 1000)), billing_type=catalog_metadata["billing_type"], api_key_env=item.get("api_key_env"), source=url, metadata=catalog_metadata))
         return result
 
     async def _discover_ollama(self) -> list[DiscoveredEndpoint]:
@@ -182,22 +156,12 @@ class ProviderDiscovery:
                 data = response.json()
         except Exception:
             return []
-        return [DiscoveredEndpoint(
-            provider="ollama", model=item["name"], base_url=base, context_window=32768,
-            tool_support=True, task_fit=0.75, reliability=0.9, latency_ms=500, billing_type="local",
-            source="ollama:/api/tags", metadata=item,
-        ) for item in data.get("models", []) if item.get("name")]
+        return [DiscoveredEndpoint(provider="ollama", model=item["name"], base_url=base, context_window=32768, tool_support=True, task_fit=0.75, reliability=0.9, latency_ms=500, billing_type="local", source="ollama:/api/tags", metadata={**item, "billing_type": "local", "zero_cost_verified": True, "category": "local", "free_status": "verified"}) for item in data.get("models", []) if item.get("name")]
 
     @staticmethod
     def _openrouter_free_fallback(spec: ProviderSpec) -> DiscoveredEndpoint:
-        model = os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free"
-        return DiscoveredEndpoint(
-            provider="openrouter", model=model, base_url=spec.base_url,
-            context_window=32768, tool_support=True, task_fit=0.8,
-            reliability=0.8, latency_ms=1000.0, billing_type="free",
-            api_key_env=spec.api_key_env, source="openrouter:free-fallback",
-            metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
-        )
+        model = "openrouter/free"
+        return DiscoveredEndpoint(provider="openrouter", model=model, base_url=spec.base_url, context_window=32768, tool_support=True, task_fit=0.8, reliability=0.8, latency_ms=1000.0, billing_type="free", api_key_env=spec.api_key_env, source="openrouter:free-fallback", metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "free_status": "verified", "zero_cost_verified": True, "api_verified": True})
 
     @staticmethod
     def _dedupe(items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
@@ -212,40 +176,28 @@ class ProviderDiscovery:
 
     @classmethod
     def _finalize(cls, items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
-        """Apply provider safety policy after every discovery source is merged."""
-        if _allow_paid_openrouter():
-            return cls._dedupe(items)
-        filtered = [
-            item
-            for item in items
-            if item.provider != "openrouter" or _is_free_openrouter_model(item.model)
-        ]
-        # A free OpenRouter fallback is useful only when OpenRouter is actually
-        # configured. Do not invent an unusable endpoint for callers that are
-        # intentionally testing/configuring another provider without credentials.
-        if (
-            os.getenv("OPENROUTER_API_KEY", "").strip()
-            and not any(item.provider == "openrouter" for item in filtered)
-        ):
+        """Final hard gate: discovery may return only verified zero-cost endpoints."""
+        filtered: list[DiscoveredEndpoint] = []
+        for item in items:
+            metadata = item.metadata if isinstance(item.metadata, dict) else {}
+            billing = str(item.billing_type or metadata.get("billing_type", "unknown")).lower()
+            is_local = billing == "local" or str(metadata.get("category", "")).lower() == "local"
+            is_free = billing in {"free", "permanent_free"} and _is_free_pricing(metadata.get("pricing")) or metadata.get("zero_cost_verified") is True
+            if is_local or is_free:
+                filtered.append(item)
+        if os.getenv("OPENROUTER_API_KEY", "").strip() and not any(item.provider == "openrouter" for item in filtered):
             spec = next((item for item in BUILTIN_PROVIDERS if item.name == "openrouter"), None)
-            base_url = spec.base_url if spec else "https://openrouter.ai/api/v1"
-            api_key_env = spec.api_key_env if spec else "OPENROUTER_API_KEY"
-            filtered.append(DiscoveredEndpoint(
-                provider="openrouter",
-                model=os.getenv("AGENT_OPENROUTER_FREE_MODEL", "openrouter/free").strip() or "openrouter/free",
-                base_url=base_url,
-                context_window=32768,
-                tool_support=True,
-                billing_type="free",
-                api_key_env=api_key_env,
-                source="openrouter:free-fallback",
-                metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "api_verified": True},
-            ))
+            if spec:
+                filtered.append(cls._openrouter_free_fallback(spec))
         return cls._dedupe(filtered)
 
 
-def _allow_paid_openrouter() -> bool:
-    return os.getenv("AGENT_ALLOW_PAID_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+def _catalog_item_is_zero_cost(billing_type: str, metadata: dict[str, Any]) -> bool:
+    if billing_type == "local":
+        return True
+    if billing_type not in {"free", "permanent_free"}:
+        return False
+    return metadata.get("zero_cost_verified") is True or metadata.get("free_status") == "verified" or _is_free_pricing(metadata.get("pricing"))
 
 
 def _is_free_openrouter_model(model: str) -> bool:
