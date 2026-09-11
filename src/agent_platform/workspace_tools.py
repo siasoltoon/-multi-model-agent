@@ -10,9 +10,14 @@ from typing import Any
 class WorkspaceTools:
     """Bounded workspace tools for an execution worker."""
 
-    ALLOWED_COMMANDS = {"python", "pytest", "pip", "npm", "node", "git", "uv", "ruff"}
+    ALLOWED_COMMANDS = {
+        "python", "pytest", "pip", "npm", "node", "git", "uv", "ruff",
+        "pwd", "ls", "find", "cat", "head", "tail", "grep", "rg", "sed",
+        "awk", "wc", "sort", "diff", "file",
+    }
     BLOCKED_ARGS = {"--system", "--global", "--user", "--break-system-packages"}
     SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY", "AUTH")
+    SHELL_OPERATORS = (";", "|", ">", "<", "`", "$(", "${", "\n", "\r")
     MAX_FILE_BYTES = 2_000_000
     MAX_COMMAND_OUTPUT = 20_000
 
@@ -48,16 +53,32 @@ class WorkspaceTools:
         path.write_bytes(encoded)
         return {"path": str(path.relative_to(self.root)), "bytes": len(encoded)}
 
-    def _argv(self, command: Any) -> list[str]:
-        if isinstance(command, list):
-            argv = [str(x) for x in command]
-        else:
-            argv = shlex.split(str(command or ""), posix=os.name != "nt")
-        if not argv or Path(argv[0]).name.lower() not in self.ALLOWED_COMMANDS:
-            raise ValueError("command is not allowlisted")
-        if any(arg in self.BLOCKED_ARGS for arg in argv[1:]):
-            raise ValueError("command contains a blocked package-management option")
-        return argv
+    @classmethod
+    def _split_chain(cls, command: Any) -> list[list[str]]:
+        """Parse a small safe command language supporting only `&&` chains."""
+        raw = " ".join(str(x) for x in command) if isinstance(command, list) else str(command or "")
+        if not raw.strip():
+            raise ValueError("empty command")
+        sanitized = raw.replace("&&", "")
+        if any(operator in sanitized for operator in cls.SHELL_OPERATORS):
+            raise ValueError("command contains a shell operator")
+        segments = [segment.strip() for segment in raw.split("&&")]
+        if any(not segment for segment in segments):
+            raise ValueError("invalid command chain")
+        try:
+            return [shlex.split(segment, posix=True) for segment in segments]
+        except ValueError as exc:
+            raise ValueError("invalid command syntax") from exc
+
+    @classmethod
+    def _argv_chain(cls, command: Any) -> list[list[str]]:
+        chain = cls._split_chain(command)
+        for argv in chain:
+            if not argv or Path(argv[0]).name.lower() not in cls.ALLOWED_COMMANDS:
+                raise ValueError("command is not allowlisted")
+            if any(arg in cls.BLOCKED_ARGS for arg in argv[1:]):
+                raise ValueError("command contains a blocked package-management option")
+        return chain
 
     @classmethod
     def _safe_environment(cls) -> dict[str, str]:
@@ -70,11 +91,13 @@ class WorkspaceTools:
             safe[key] = value
         return safe
 
-    async def run_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        argv = self._argv(args.get("command"))
+    async def _run_argv(self, argv: list[str]) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=self.root, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            *argv,
+            cwd=self.root,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             env=self._safe_environment(),
         )
         try:
@@ -82,8 +105,21 @@ class WorkspaceTools:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            return {"exit_code": -1, "output": "command timed out"}
-        return {"exit_code": proc.returncode, "output": out.decode("utf-8", errors="replace")[-self.MAX_COMMAND_OUTPUT:]}
+            return -1, "command timed out"
+        return proc.returncode, out.decode("utf-8", errors="replace")
+
+    async def run_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        chain = self._argv_chain(args.get("command"))
+        chunks: list[str] = []
+        exit_code = 0
+        for argv in chain:
+            code, output = await self._run_argv(argv)
+            exit_code = code
+            if output:
+                chunks.append(output)
+            if code != 0:
+                break
+        return {"exit_code": exit_code, "output": "".join(chunks)[-self.MAX_COMMAND_OUTPUT:]}
 
     async def git_diff(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.run_command({"command": ["git", "diff", "--no-ext-diff", "--"]})
@@ -96,6 +132,6 @@ class WorkspaceTools:
         return [
             {"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
             {"type": "function", "function": {"name": "write_file", "description": "Create or replace a UTF-8 text file inside the workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-            {"type": "function", "function": {"name": "run_command", "description": "Run an allowlisted development command in the workspace without inheriting secret environment variables.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
+            {"type": "function", "function": {"name": "run_command", "description": "Run safe allowlisted development commands in the workspace. Supports command chaining with &&, never a shell.", "parameters": {"type": "object", "properties": {"command": {"type": ["string", "array"]}}, "required": ["command"]}}},
             {"type": "function", "function": {"name": "git_diff", "description": "Inspect current git diff.", "parameters": {"type": "object", "properties": {}}}},
         ]
