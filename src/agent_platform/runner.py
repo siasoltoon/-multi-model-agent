@@ -23,9 +23,10 @@ async def run_task(task: Task, router: SmartRouter, workspace: str) -> dict:
         task.metadata["last_provider"] = last.get("provider")
     if result.get("status") == "checkpointed":
         task.checkpoint = {
-            "version": 2,
+            "version": 3,
             "task_id": str(task.id),
             "active_role": result.get("active_role"),
+            "checkpoint_reason": result.get("checkpoint_reason", "timeout"),
             "phases": redact_secrets(phases),
             "messages": redact_secrets(result.get("messages", [])),
             "steps": task.current_step,
