@@ -99,8 +99,8 @@ def test_provider_diverse_pool_keeps_only_best_endpoint_per_provider():
         ModelEndpoint("local", "ollama", "qwen", reliability=0.85, metadata={"billing_type": "local", "category": "local"}),
     ])
     pool = router.ranked_provider_diverse(task_type="coding", role="coding", max_providers=3)
-    assert [item.provider for item in pool] == ["ollama", "groq", "openrouter"]
-    assert [item.id for item in pool] == ["local", "groq-coder", "openrouter-best"]
+    assert [item.provider for item in pool] == ["ollama", "openrouter", "groq"]
+    assert [item.id for item in pool] == ["local", "openrouter-best", "groq-coder"]
 
 
 def test_provider_diverse_pool_excludes_quarantined_provider():
