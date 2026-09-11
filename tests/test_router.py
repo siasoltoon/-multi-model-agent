@@ -69,13 +69,26 @@ def test_candidate_free_status_without_verified_zero_cost_is_excluded():
     assert router.choose().id == "verified-verified"
 
 
-def test_local_endpoint_is_always_zero_cost_eligible():
+def test_local_endpoint_is_optional_by_default():
     router = SmartRouter([
-        ModelEndpoint("local", "ollama", "qwen", metadata={"billing_type": "local", "category": "local"}),
-        ModelEndpoint("paid", "provider", "premium", metadata={"billing_type": "paid"}),
+        ModelEndpoint("local", "ollama", "weak-local", task_fit=0.8, reliability=0.8, metadata={"billing_type": "local", "category": "local"}),
+        free("remote", "strong-free", task_fit=1.0, reliability=1.0),
+    ])
+    assert router.choose().id == "remote-strong-free"
+
+
+def test_local_can_be_explicitly_preferred(monkeypatch):
+    monkeypatch.setenv("AGENT_PREFER_LOCAL", "true")
+    router = SmartRouter([
+        ModelEndpoint("local", "ollama", "local-model", task_fit=1.0, reliability=1.0, metadata={"billing_type": "local", "category": "local"}),
+        free("remote", "remote-model", task_fit=1.0, reliability=0.99),
     ])
     assert router.choose().id == "local"
-    assert SmartRouter.is_zero_cost(router.endpoints[0])
+
+
+def test_local_endpoint_is_zero_cost_eligible():
+    endpoint = ModelEndpoint("local", "ollama", "qwen", metadata={"billing_type": "local", "category": "local"})
+    assert SmartRouter.is_zero_cost(endpoint)
 
 
 def test_only_paid_or_unknown_endpoints_fail_cleanly():
@@ -95,8 +108,8 @@ def test_provider_diverse_pool_keeps_only_best_endpoint_per_provider():
         ModelEndpoint("local", "ollama", "qwen", reliability=0.85, metadata={"billing_type": "local", "category": "local"}),
     ])
     pool = router.ranked_provider_diverse(task_type="coding", role="coding", max_providers=3)
-    assert [item.provider for item in pool] == ["openrouter", "ollama", "groq"]
-    assert [item.id for item in pool] == ["openrouter-best", "local", "groq-coder"]
+    assert [item.provider for item in pool] == ["openrouter", "groq", "ollama"]
+    assert [item.id for item in pool] == ["openrouter-best", "groq-coder", "local"]
 
 
 def test_provider_diverse_pool_excludes_quarantined_provider():
