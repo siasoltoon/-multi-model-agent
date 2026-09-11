@@ -59,4 +59,4 @@ async def test_executor_checkpoints_before_starting_next_subtask(monkeypatch, tm
     result = await executor.run(Task(prompt="x", max_steps=1), dag)
     assert result["status"] == "checkpointed"
     assert result["checkpoint_reason"] == "subtask_budget"
-    assert "subtask_dag" if False else True
+    assert result["dag"]["nodes"]["a"]["status"] == "pending"
