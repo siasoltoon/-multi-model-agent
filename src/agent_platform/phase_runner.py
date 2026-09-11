@@ -86,7 +86,17 @@ class PhaseRunner:
 
     def _adapter(self, role: str):
         ranked = self.router.ranked(min_context=4096, tools=ROLE_TOOLING[role], task_type=ROLE_TASK_TYPES[role], role=role)
-        selected = ranked[: self.max_failover]
+        # A provider/API key is one quota and one failure domain. Never spend
+        # failover attempts on multiple models from the same provider.
+        selected = []
+        seen_providers: set[str] = set()
+        for endpoint in ranked:
+            if endpoint.provider in seen_providers:
+                continue
+            selected.append(endpoint)
+            seen_providers.add(endpoint.provider)
+            if len(selected) >= self.max_failover:
+                break
         if not selected:
             raise RuntimeError(f"no model endpoint available for role: {role}")
 
