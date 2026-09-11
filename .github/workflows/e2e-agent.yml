@@ -10,7 +10,7 @@ on:
       repository:
         description: Target repository containing agent-worker.yml
         required: false
-        default: sia644a434/multi-model-agent
+        default: sia644434/multi-model-agent
         type: string
       base_branch:
         description: Target base branch
