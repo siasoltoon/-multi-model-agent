@@ -73,9 +73,8 @@ class WorkerOrchestrator:
             score += 15.0
         if models:
             score += len(models) * 5.0
-        # Capacity is only a bounded tie-breaker; it must never defeat the
-        # default laptop-first policy when there are no hard requirements.
-        score += min(worker.available_slots, 4) * 4.0
+        # Capacity is a bounded load-balancing signal, not a provider preference.
+        score += min(worker.available_slots, 4) * 1.0
         score -= worker.load_ratio * 30.0
         return True, score, matched
 
@@ -87,9 +86,9 @@ class WorkerOrchestrator:
                 continue
             fits, score, matched = self._fit(worker, requirements)
             if fits:
-                # Laptop-first is an intentional default. Capability/resource
-                # requirements still act as hard filters, while score handles
-                # stronger workers among compatible real workers.
+                # Real workers are preferred over synthetic GitHub fallback.
+                # Among real workers of the same kind, capability/resource/load
+                # scoring decides; laptop remains the default execution kind.
                 if worker.kind == WorkerKind.LAPTOP.value:
                     priority = 0
                     score += 20.0
