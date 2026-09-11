@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 
 from agent_platform.models import Task, TaskStatus
 from agent_platform.worker_protocol import WorkerProtocol
@@ -38,7 +37,7 @@ def test_stale_laptop_task_is_requeued_and_lease_released():
     assert task.status == TaskStatus.QUEUED
     assert task.worker_id is None
     assert "lease_id" not in task.metadata
-    assert not leases.valid("laptop-01", str(task.id), "lease-1")
+    assert not leases.valid("lease-1", "laptop-01", str(task.id))
     assert any(event[1] == "worker_recovered" for event in store.events)
 
 
