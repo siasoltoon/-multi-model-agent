@@ -95,3 +95,72 @@ def test_github_remains_fallback_for_generic_requirements():
 
     assert selected is not None
     assert selected.kind == WorkerKind.GITHUB
+
+
+def test_worker_claim_tracks_capacity_and_release_restores_slot():
+    registry = WorkerRegistry()
+    worker = registry.register(Worker(worker_id="worker-01", max_concurrent_tasks=2))
+
+    registry.claim(worker.worker_id)
+    assert worker.active_tasks == 1
+    assert worker.available_slots == 1
+    assert worker.status == WorkerStatus.BUSY
+
+    registry.claim(worker.worker_id)
+    assert worker.active_tasks == 2
+    assert worker.available_slots == 0
+
+    try:
+        registry.claim(worker.worker_id)
+        assert False, "a saturated worker must not accept another task"
+    except RuntimeError:
+        pass
+
+    registry.release(worker.worker_id)
+    assert worker.active_tasks == 1
+    assert worker.available_slots == 1
+    assert worker.status == WorkerStatus.BUSY
+
+    registry.release(worker.worker_id)
+    assert worker.active_tasks == 0
+    assert worker.available_slots == 2
+    assert worker.status == WorkerStatus.ONLINE
+
+
+def test_saturated_worker_is_not_a_candidate():
+    registry = WorkerRegistry()
+    worker = registry.register(Worker(worker_id="worker-01", max_concurrent_tasks=1))
+    registry.claim(worker.worker_id)
+
+    orchestrator = WorkerOrchestrator(registry, github_enabled=False)
+
+    assert orchestrator.select() is None
+
+
+def test_load_aware_scheduler_prefers_worker_with_more_capacity():
+    registry = WorkerRegistry()
+    busy = registry.register(Worker(worker_id="busy", max_concurrent_tasks=4))
+    free = registry.register(Worker(worker_id="free", max_concurrent_tasks=4))
+    registry.claim(busy.worker_id)
+    registry.claim(busy.worker_id)
+    registry.claim(busy.worker_id)
+
+    orchestrator = WorkerOrchestrator(registry, github_enabled=False)
+    selected = orchestrator.select()
+
+    assert selected is not None
+    assert selected.worker_id == "free"
+    assert selected.available_slots == 4
+
+
+def test_register_resets_previous_runtime_load():
+    registry = WorkerRegistry()
+    worker = registry.register(Worker(worker_id="worker-01", max_concurrent_tasks=2))
+    registry.claim(worker.worker_id)
+    assert worker.active_tasks == 1
+
+    replacement = registry.register(Worker(worker_id="worker-01", max_concurrent_tasks=3))
+
+    assert replacement.active_tasks == 0
+    assert replacement.available_slots == 3
+    assert replacement.status == WorkerStatus.ONLINE
