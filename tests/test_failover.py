@@ -56,6 +56,30 @@ def test_failover_stops_on_provider_quota_exhaustion():
     assert calls == ["quota"]
 
 
+def test_failover_switches_to_next_provider_after_provider_quota():
+    calls = []
+
+    class QuotaFailingAdapter:
+        async def generate(self, messages, *, tools=None):
+            calls.append("quota")
+            raise RuntimeError("Rate limit exceeded: free-models-per-day")
+
+    class NextProviderAdapter:
+        async def generate(self, messages, *, tools=None):
+            calls.append("next-provider")
+            return ModelResponse("recovered", {}, {}, [])
+
+    adapter = FailoverAdapter(
+        [("openrouter-a", QuotaFailingAdapter()), ("groq-a", NextProviderAdapter())],
+        on_failure=lambda endpoint_id, error: False,
+        quarantine_on_failure=True,
+    )
+    result = asyncio.run(adapter.generate([{"role": "user", "content": "quota"}]))
+    assert result.text == "recovered"
+    assert adapter.active_endpoint_id == "groq-a"
+    assert calls == ["quota", "next-provider"]
+
+
 def test_failover_allows_later_recovery_retry_of_same_endpoint():
     class RecoveringAdapter:
         def __init__(self):
@@ -82,7 +106,6 @@ def test_failover_allows_later_recovery_retry_of_same_endpoint():
         return await adapter.generate([{"role": "user", "content": "retry"}])
 
     result = asyncio.run(run())
-
     assert result.text == "recovered"
     assert provider.calls == 2
     assert failures == ["only"]

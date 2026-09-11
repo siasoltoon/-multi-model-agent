@@ -108,7 +108,8 @@ def test_agent_loop_does_not_spend_repair_attempts_on_provider_exhaustion(tmp_pa
         )
 
     result = asyncio.run(run())
-    assert result["status"] == "failed"
+    assert result["status"] == "checkpointed"
+    assert result["checkpoint_reason"] == "free_provider_pool_exhausted"
     assert result["steps"] == 0
     assert result["repairs"] == 0
     assert result["provider_failover_exhausted"] is True
