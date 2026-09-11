@@ -117,3 +117,14 @@ def test_provider_diverse_pool_excludes_quarantined_provider():
     router.mark_failure("openrouter-a", "free-models-per-day quota exhausted")
     pool = router.ranked_provider_diverse(max_providers=5)
     assert [item.provider for item in pool] == ["groq"]
+
+
+def test_provider_state_round_trips_quarantine_and_backoff():
+    router = SmartRouter([free("openrouter", "a"), free("groq", "b")])
+    router.mark_failure("openrouter-a", "free-models-per-day quota exhausted")
+    state = router.snapshot_provider_state()
+    restored = SmartRouter([free("openrouter", "a"), free("groq", "b")])
+    restored.restore_provider_state(state)
+    assert restored.endpoints[0].health == "QUOTA_EXHAUSTED"
+    assert restored.endpoints[0].quota_remaining == 0.0
+    assert restored.choose().id == "groq-b"
