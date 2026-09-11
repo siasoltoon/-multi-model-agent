@@ -66,3 +66,26 @@ def test_free_provider_is_not_preferred_over_paid_or_unknown():
         ModelEndpoint("paid", "groq", "paid", reliability=0.95, metadata={"billing_type": "paid_or_unknown"}),
     ])
     assert router.choose().id == "paid"
+
+
+def test_provider_diverse_pool_keeps_only_best_endpoint_per_provider():
+    router = SmartRouter([
+        ModelEndpoint("or-best", "openrouter", "best", reliability=0.99, metadata={"billing_type": "free"}),
+        ModelEndpoint("or-worse", "openrouter", "worse", reliability=0.60, metadata={"billing_type": "free"}),
+        ModelEndpoint("groq", "groq", "coder", reliability=0.90, metadata={"billing_type": "paid_or_unknown"}),
+        ModelEndpoint("local", "ollama", "qwen", reliability=0.85, metadata={"billing_type": "local", "category": "local"}),
+    ])
+    pool = router.ranked_provider_diverse(task_type="coding", role="coding", max_providers=3)
+    assert [item.provider for item in pool] == ["ollama", "groq", "openrouter"]
+    assert [item.id for item in pool] == ["local", "groq", "or-best"]
+
+
+def test_provider_diverse_pool_excludes_quarantined_provider():
+    router = SmartRouter([
+        ModelEndpoint("or-a", "openrouter", "a"),
+        ModelEndpoint("or-b", "openrouter", "b"),
+        ModelEndpoint("groq", "groq", "c"),
+    ])
+    router.mark_failure("or-a", "free-models-per-day quota exhausted")
+    pool = router.ranked_provider_diverse(max_providers=5)
+    assert [item.provider for item in pool] == ["groq"]
