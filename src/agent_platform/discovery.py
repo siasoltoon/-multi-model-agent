@@ -91,7 +91,10 @@ class ProviderDiscovery:
             pricing = item.get("pricing")
             is_free = _is_free_pricing(pricing)
             openrouter_free = spec.name == "openrouter" and _is_free_openrouter_model(model)
-            if not (openrouter_free or is_free):
+            if spec.name == "openrouter":
+                if not openrouter_free:
+                    continue
+            elif not is_free:
                 continue
             if openrouter_free:
                 explicit_free_openrouter = True
@@ -107,7 +110,7 @@ class ProviderDiscovery:
                 "registry": registry.to_metadata() if registry else {},
                 "api_verified": True,
                 "billing_type": "free",
-                "free_status": "verified" if is_free or openrouter_free else "unknown",
+                "free_status": "verified",
                 "zero_cost_verified": True,
             }
             result.append(DiscoveredEndpoint(provider=spec.name, model=model, base_url=spec.base_url, context_window=context, tool_support=tool_support, billing_type="free", api_key_env=spec.api_key_env, source=spec.models_url, metadata=metadata))
@@ -138,13 +141,17 @@ class ProviderDiscovery:
                 if not model:
                     continue
                 model_name = str(model)
-                if provider == "openrouter" and not _is_free_openrouter_model(model_name):
-                    continue
-                if not _catalog_item_is_zero_cost(billing_type, metadata):
-                    continue
+                if provider == "openrouter":
+                    if not _is_free_openrouter_model(model_name):
+                        continue
+                    catalog_billing = "free"
+                else:
+                    if not _catalog_item_is_zero_cost(billing_type, metadata):
+                        continue
+                    catalog_billing = "local" if billing_type == "local" else "free"
                 catalog_metadata = dict(metadata)
-                catalog_metadata.update({"billing_type": "local" if billing_type == "local" else "free", "zero_cost_verified": True})
-                result.append(DiscoveredEndpoint(provider=provider, model=model_name, base_url=str(base), context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)), task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)), latency_ms=float(item.get("latency_ms", 1000)), billing_type=catalog_metadata["billing_type"], api_key_env=item.get("api_key_env"), source=url, metadata=catalog_metadata))
+                catalog_metadata.update({"billing_type": catalog_billing, "zero_cost_verified": True, "free_status": "verified"})
+                result.append(DiscoveredEndpoint(provider=provider, model=model_name, base_url=str(base), context_window=int(item.get("context_window", 32768)), tool_support=bool(item.get("tool_support", True)), task_fit=float(item.get("task_fit", 0.8)), reliability=float(item.get("reliability", 0.8)), latency_ms=float(item.get("latency_ms", 1000)), billing_type=catalog_billing, api_key_env=item.get("api_key_env"), source=url, metadata=catalog_metadata))
         return result
 
     async def _discover_ollama(self) -> list[DiscoveredEndpoint]:
@@ -160,8 +167,7 @@ class ProviderDiscovery:
 
     @staticmethod
     def _openrouter_free_fallback(spec: ProviderSpec) -> DiscoveredEndpoint:
-        model = "openrouter/free"
-        return DiscoveredEndpoint(provider="openrouter", model=model, base_url=spec.base_url, context_window=32768, tool_support=True, task_fit=0.8, reliability=0.8, latency_ms=1000.0, billing_type="free", api_key_env=spec.api_key_env, source="openrouter:free-fallback", metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "free_status": "verified", "zero_cost_verified": True, "api_verified": True})
+        return DiscoveredEndpoint(provider="openrouter", model="openrouter/free", base_url=spec.base_url, context_window=32768, tool_support=True, task_fit=0.8, reliability=0.8, latency_ms=1000.0, billing_type="free", api_key_env=spec.api_key_env, source="openrouter:free-fallback", metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "free_status": "verified", "zero_cost_verified": True, "api_verified": True})
 
     @staticmethod
     def _dedupe(items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
@@ -182,7 +188,7 @@ class ProviderDiscovery:
             metadata = item.metadata if isinstance(item.metadata, dict) else {}
             billing = str(item.billing_type or metadata.get("billing_type", "unknown")).lower()
             is_local = billing == "local" or str(metadata.get("category", "")).lower() == "local"
-            is_free = billing in {"free", "permanent_free"} and _is_free_pricing(metadata.get("pricing")) or metadata.get("zero_cost_verified") is True
+            is_free = metadata.get("zero_cost_verified") is True or (billing in {"free", "permanent_free"} and _is_free_pricing(metadata.get("pricing")))
             if is_local or is_free:
                 filtered.append(item)
         if os.getenv("OPENROUTER_API_KEY", "").strip() and not any(item.provider == "openrouter" for item in filtered):
