@@ -23,7 +23,10 @@ class SubtaskDag:
     def __init__(self, subtasks: list[Subtask] | None = None):
         self.nodes: dict[str, Subtask] = {}
         for subtask in subtasks or []:
-            self.add(subtask)
+            if not subtask.id or subtask.id in self.nodes:
+                raise ValueError(f"duplicate subtask: {subtask.id}")
+            self.nodes[subtask.id] = subtask
+        self.validate()
 
     def add(self, subtask: Subtask) -> None:
         if not subtask.id or subtask.id in self.nodes:
@@ -123,7 +126,8 @@ def parse_subtask_plan(text: str, *, max_subtasks: int = 12) -> SubtaskDag:
         raise ValueError("planner returned no subtasks")
     if len(items) > max_subtasks:
         raise ValueError(f"planner returned too many subtasks: {len(items)}")
-    result = SubtaskDag()
+    subtasks: list[Subtask] = []
+    seen_ids: set[str] = set()
     for index, item in enumerate(items, 1):
         if not isinstance(item, dict):
             raise ValueError(f"invalid subtask at index {index}")
@@ -133,12 +137,14 @@ def parse_subtask_plan(text: str, *, max_subtasks: int = 12) -> SubtaskDag:
         role = str(item.get("role", "coder")).strip().lower()
         if not node_id or not title or not objective:
             raise ValueError(f"incomplete subtask at index {index}")
+        if node_id in seen_ids:
+            raise ValueError(f"duplicate subtask: {node_id}")
         if role not in {"analyst", "architect", "coder", "tester", "reviewer", "security", "repairer"}:
             raise ValueError(f"unsupported subtask role: {role}")
         dependencies = {str(value).strip() for value in item.get("dependencies", []) if str(value).strip()}
-        result.add(Subtask(node_id, title, objective, role, dependencies))
-    result.validate()
-    return result
+        subtasks.append(Subtask(node_id, title, objective, role, dependencies))
+        seen_ids.add(node_id)
+    return SubtaskDag(subtasks)
 
 
 PLANNER_INSTRUCTIONS = """Decompose the software task into the smallest useful independently executable subtasks.
