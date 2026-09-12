@@ -58,6 +58,7 @@ class ProviderDiscovery:
 
     async def discover(self) -> list[DiscoveredEndpoint]:
         found: list[DiscoveredEndpoint] = []
+        tokenharbor_target = os.getenv("TOKENHARBOR_FREE_MODEL", "deepseek-v4.1-flash:free").strip()
         for spec in self.providers:
             api_key = os.getenv(spec.api_key_env, "").strip()
             if not api_key:
@@ -65,6 +66,11 @@ class ProviderDiscovery:
             try:
                 found.extend(await self._discover_openai_compatible(spec, api_key))
             except Exception:
+                if spec.name == "tokenharbor" and tokenharbor_target:
+                    # The pinned Token Harbor :free route is verified by
+                    # configuration, so transient catalog failures must not
+                    # make the provider disappear from runtime routing.
+                    found.append(self._tokenharbor_free_fallback(spec, tokenharbor_target))
                 continue
         for url in self.catalog_urls:
             try:
@@ -93,8 +99,6 @@ class ProviderDiscovery:
             is_free = _is_free_pricing(pricing)
             openrouter_free = spec.name == "openrouter" and _is_free_openrouter_model(model)
             if spec.name == "tokenharbor":
-                # Token Harbor is intentionally pinned to the user's selected
-                # free route. Never discover or route its paid models.
                 if model != tokenharbor_target or not is_free:
                     continue
             elif spec.name == "openrouter":
@@ -126,10 +130,6 @@ class ProviderDiscovery:
         if spec.name == "openrouter" and not explicit_free_openrouter:
             result.append(self._openrouter_free_fallback(spec))
         if spec.name == "tokenharbor" and not any(item.provider == "tokenharbor" and item.model == tokenharbor_target for item in result):
-            # Some Token Harbor /models responses omit pricing metadata even
-            # though the explicitly pinned :free route is valid. Because this
-            # exact model is configured as the only allowed Token Harbor route,
-            # keep it discoverable without ever admitting arbitrary paid models.
             result.append(self._tokenharbor_free_fallback(spec, tokenharbor_target))
         return result
 
@@ -201,7 +201,6 @@ class ProviderDiscovery:
 
     @classmethod
     def _finalize(cls, items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
-        """Final hard gate: discovery may return only verified zero-cost endpoints."""
         filtered: list[DiscoveredEndpoint] = []
         for item in items:
             metadata = item.metadata if isinstance(item.metadata, dict) else {}
