@@ -57,6 +57,7 @@ def _oc(provider_id: str, display_name: str, base_url: str, models_url: str | No
 PROVIDER_REGISTRY: tuple[ProviderDefinition, ...] = (
     # Gateways / aggregators
     _oc("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/models", "OPENROUTER_API_KEY", category="gateway", roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification"), discovery_supported=True),
+    _oc("tokenharbor", "Token Harbor", "https://tokenharbor.ai/v1", "https://tokenharbor.ai/v1/models", "TOKENHARBOR_API_KEY", category="gateway", free_status="verified", free_quota="rolling_7_day_value_allowance", roles=("analysis", "architecture", "coding", "testing", "review", "security", "verification"), discovery_supported=True),
     _oc("requesty", "Requesty", "https://router.requesty.ai/v1", "https://router.requesty.ai/v1/models", "REQUESTY_API_KEY", category="gateway", free_status="candidate", roles=("analysis", "coding", "testing")),
     _oc("portkey", "Portkey", "https://api.portkey.ai/v1", "https://api.portkey.ai/v1/models", "PORTKEY_API_KEY", category="gateway", roles=("analysis", "architecture", "coding", "review")),
     _oc("vercel", "Vercel AI Gateway", "https://ai-gateway.vercel.sh/v1", "https://ai-gateway.vercel.sh/v1/models", "VERCEL_AI_GATEWAY_API_KEY", category="gateway", free_status="candidate", roles=("analysis", "coding", "testing")),
