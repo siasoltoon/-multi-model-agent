@@ -65,17 +65,27 @@ class SubtaskExecutor:
         self.max_retries = max(1, int(os.getenv("AGENT_SUBTASK_REPAIR_ATTEMPTS", "2")))
         self.max_failover = max(1, int(os.getenv("AGENT_MAX_PROVIDER_FAILOVERS", "5")))
         self.max_runtime = max(1.0, float(os.getenv("AGENT_SUBTASK_MAX_RUNTIME_SECONDS", "1800")))
+        self.preferred_provider = os.getenv("AGENT_PREFERRED_PROVIDER", "").strip().lower()
 
     def _adapter(self, role: str):
-        selected = self.router.ranked_provider_diverse(
+        ranked = self.router.ranked_provider_diverse(
             min_context=4096,
             tools=ROLE_TOOLS[role],
             task_type=ROLE_TASK_TYPES[role],
             role=role,
-            max_providers=self.max_failover,
+            max_providers=None,
         )
+        if self.preferred_provider:
+            ranked.sort(key=lambda e: 0 if e.provider.lower() == self.preferred_provider else 1)
+        selected = ranked[: self.max_failover]
         if not selected:
             raise RuntimeError(f"no zero-cost model endpoint available for subtask role: {role}")
+        print(
+            "provider routing "
+            f"role={role} preferred={self.preferred_provider or 'none'} "
+            f"selected=" + ",".join(f"{e.provider}:{e.model}" for e in selected),
+            flush=True,
+        )
 
         def on_failure(endpoint_id, error):
             self.router.mark_failure(endpoint_id, error, provider_quota_exhausted=is_provider_quota_exhausted(error))
@@ -103,6 +113,11 @@ class SubtaskExecutor:
         loop = AgentLoop(adapter, tools.as_tools(), AgentPolicy(max_steps=budget, repair_attempts=3, timeout_seconds=self.max_runtime))
         result = await loop.run([{"role": "system", "content": system}, {"role": "user", "content": user}], tools.specs())
         active = next((e for e in selected if e.id == adapter.active_endpoint_id), selected[0])
+        print(
+            f"provider selected role={role} provider={active.provider} model={active.model} "
+            f"status={result.get('status')} steps={result.get('steps', 0)}",
+            flush=True,
+        )
         if result.get("status") == "completed":
             self.router.mark_success(active.id)
         elif not result.get("provider_failover_exhausted"):
