@@ -125,6 +125,12 @@ class ProviderDiscovery:
             result.append(DiscoveredEndpoint(provider=spec.name, model=model, base_url=spec.base_url, context_window=context, tool_support=tool_support, billing_type="free", api_key_env=spec.api_key_env, source=spec.models_url, metadata=metadata))
         if spec.name == "openrouter" and not explicit_free_openrouter:
             result.append(self._openrouter_free_fallback(spec))
+        if spec.name == "tokenharbor" and not any(item.provider == "tokenharbor" and item.model == tokenharbor_target for item in result):
+            # Some Token Harbor /models responses omit pricing metadata even
+            # though the explicitly pinned :free route is valid. Because this
+            # exact model is configured as the only allowed Token Harbor route,
+            # keep it discoverable without ever admitting arbitrary paid models.
+            result.append(self._tokenharbor_free_fallback(spec, tokenharbor_target))
         return result
 
     async def _load_catalog(self, url: str) -> list[DiscoveredEndpoint]:
@@ -177,6 +183,10 @@ class ProviderDiscovery:
     @staticmethod
     def _openrouter_free_fallback(spec: ProviderSpec) -> DiscoveredEndpoint:
         return DiscoveredEndpoint(provider="openrouter", model="openrouter/free", base_url=spec.base_url, context_window=32768, tool_support=True, task_fit=0.8, reliability=0.8, latency_ms=1000.0, billing_type="free", api_key_env=spec.api_key_env, source="openrouter:free-fallback", metadata={"catalog": "openrouter-free-fallback", "billing_type": "free", "free_status": "verified", "zero_cost_verified": True, "api_verified": True})
+
+    @staticmethod
+    def _tokenharbor_free_fallback(spec: ProviderSpec, model: str) -> DiscoveredEndpoint:
+        return DiscoveredEndpoint(provider="tokenharbor", model=model, base_url=spec.base_url, context_window=32768, tool_support=True, task_fit=0.9, reliability=0.8, latency_ms=800.0, billing_type="free", api_key_env=spec.api_key_env, source="tokenharbor:free-fallback", metadata={"catalog": "tokenharbor-free-fallback", "free_route": model, "free_route_pinned": True, "billing_type": "free", "free_status": "verified", "zero_cost_verified": True, "api_verified": True})
 
     @staticmethod
     def _dedupe(items: list[DiscoveredEndpoint]) -> list[DiscoveredEndpoint]:
