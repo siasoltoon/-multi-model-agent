@@ -44,9 +44,9 @@ Current built-in provider variables:
 
 ### Token Harbor free DeepSeek V4.1 Flash
 
-Token Harbor exposes an OpenAI-compatible gateway at `https://tokenharbor.ai/v1`. The current free catalog includes **DeepSeek V4.1 Flash Limited** with model ID `deepseek-v4.1-flash:free`. The agent treats Token Harbor as a verified zero-cost provider and discovers its currently free models automatically; it does not enable paid Token Harbor models. citeturn0search8turn0search2
+Token Harbor exposes an OpenAI-compatible gateway at `https://tokenharbor.ai/v1`. Its current free catalog includes **DeepSeek V4.1 Flash Limited** with model ID `deepseek-v4.1-flash:free`. The agent treats Token Harbor as a verified zero-cost provider and discovers its currently free models automatically; it does not enable paid Token Harbor models.
 
-Set the key as `TOKENHARBOR_API_KEY`. Do not commit the key to the repository. The free allowance is value-based over a rolling 7×24-hour period rather than a fixed request count, and Token Harbor currently states that there is no separate per-minute request cap for the free program. citeturn0search2
+Set the key as `TOKENHARBOR_API_KEY`. Do not commit the key to the repository. The free allowance is value-based over a rolling 7×24-hour period rather than a fixed request count, and Token Harbor currently states that there is no separate per-minute request cap for the free program.
 
 For an Agent deployment, the important values are:
 
@@ -56,7 +56,7 @@ Base URL: https://tokenharbor.ai/v1
 Model: deepseek-v4.1-flash:free
 ```
 
-The shared OpenAI-compatible adapter passes tool calls through to the model, so the model can participate in the normal plan → execute → test → review → repair loop. Token Harbor's current documentation states that its supported DeepSeek Flash routes provide tool calls and a 1M-token context window. citeturn0search1
+The shared OpenAI-compatible adapter passes tool calls through to the model, so the model can participate in the normal plan → execute → test → review → repair loop. Token Harbor's current DeepSeek Flash documentation lists tool calls and a 1M-token context window for its Flash routes.
 
 The repository's Smart Router still enforces the project's zero-cost policy. If Token Harbor removes the free model or the gateway reports a non-free price, that model is not eligible for routing.
 
