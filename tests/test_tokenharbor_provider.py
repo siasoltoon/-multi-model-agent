@@ -64,6 +64,34 @@ def test_tokenharbor_discovers_only_the_selected_free_model(monkeypatch):
     assert found[0].metadata["free_route_pinned"] is True
 
 
+def test_tokenharbor_pinned_free_model_falls_back_when_pricing_is_missing(monkeypatch):
+    monkeypatch.setenv("TOKENHARBOR_API_KEY", "secret")
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", url),
+                json={"data": [{"id": "deepseek-v4.1-flash:free"}, {"id": "paid-model"}]},
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    discovery = ProviderDiscovery(providers=tuple(item for item in BUILTIN_PROVIDERS if item.name == "tokenharbor"))
+    monkeypatch.setattr(discovery, "_discover_ollama", lambda: asyncio.sleep(0, result=[]))
+
+    found = asyncio.run(discovery.discover())
+    assert [(item.provider, item.model) for item in found] == [("tokenharbor", "deepseek-v4.1-flash:free")]
+    assert found[0].metadata["catalog"] == "tokenharbor-free-fallback"
+    assert found[0].metadata["free_route_pinned"] is True
+    assert found[0].billing_type == "free"
+
+
 def test_tokenharbor_free_model_can_be_overridden_without_enabling_paid_models(monkeypatch):
     monkeypatch.setenv("TOKENHARBOR_API_KEY", "secret")
     monkeypatch.setenv("TOKENHARBOR_FREE_MODEL", "another-model:free")
