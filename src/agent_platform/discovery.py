@@ -84,6 +84,7 @@ class ProviderDiscovery:
         registry = next((x for x in PROVIDER_REGISTRY if x.provider_id == spec.name), None)
         result: list[DiscoveredEndpoint] = []
         explicit_free_openrouter = False
+        tokenharbor_target = os.getenv("TOKENHARBOR_FREE_MODEL", "deepseek-v4.1-flash:free").strip()
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
@@ -91,7 +92,12 @@ class ProviderDiscovery:
             pricing = item.get("pricing")
             is_free = _is_free_pricing(pricing)
             openrouter_free = spec.name == "openrouter" and _is_free_openrouter_model(model)
-            if spec.name == "openrouter":
+            if spec.name == "tokenharbor":
+                # Token Harbor is intentionally pinned to the user's selected
+                # free route. Never discover or route its paid models.
+                if model != tokenharbor_target or not is_free:
+                    continue
+            elif spec.name == "openrouter":
                 if not openrouter_free:
                     continue
             elif not is_free:
@@ -113,6 +119,9 @@ class ProviderDiscovery:
                 "free_status": "verified",
                 "zero_cost_verified": True,
             }
+            if spec.name == "tokenharbor":
+                metadata["free_route"] = tokenharbor_target
+                metadata["free_route_pinned"] = True
             result.append(DiscoveredEndpoint(provider=spec.name, model=model, base_url=spec.base_url, context_window=context, tool_support=tool_support, billing_type="free", api_key_env=spec.api_key_env, source=spec.models_url, metadata=metadata))
         if spec.name == "openrouter" and not explicit_free_openrouter:
             result.append(self._openrouter_free_fallback(spec))
