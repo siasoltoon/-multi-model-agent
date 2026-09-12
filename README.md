@@ -24,7 +24,7 @@ Install production extras with `pip install -e '.[all]'`.
 
 ## Provider/model discovery and routing
 
-The control plane automatically discovers models from configured provider catalogs when their credentials exist. Built-in OpenAI-compatible catalogs currently cover **OpenRouter, Groq, Cerebras, Together AI, Fireworks AI, and Mistral**, plus local **Ollama** discovery and operator-declared JSON catalogs through `AGENT_PROVIDER_CATALOGS`.
+The control plane automatically discovers models from configured provider catalogs when their credentials exist. Built-in OpenAI-compatible catalogs currently cover **Token Harbor, OpenRouter, Groq, Cerebras, Together AI, Fireworks AI, and Mistral**, plus local **Ollama** discovery and operator-declared JSON catalogs through `AGENT_PROVIDER_CATALOGS`.
 
 For every discovered model the registry records provider, model ID, context window, tool capability, billing classification, task-fit metadata and the secret environment-variable name. Secrets themselves are never written to task state or the model catalog.
 
@@ -34,12 +34,31 @@ At runtime, discovered endpoints are registered with the Smart Router. Routing i
 
 Current built-in provider variables:
 
+- `TOKENHARBOR_API_KEY`
 - `OPENROUTER_API_KEY`
 - `GROQ_API_KEY`
 - `CEREBRAS_API_KEY`
 - `TOGETHER_API_KEY`
 - `FIREWORKS_API_KEY`
 - `MISTRAL_API_KEY`
+
+### Token Harbor free DeepSeek V4.1 Flash
+
+Token Harbor exposes an OpenAI-compatible gateway at `https://tokenharbor.ai/v1`. The current free catalog includes **DeepSeek V4.1 Flash Limited** with model ID `deepseek-v4.1-flash:free`. The agent treats Token Harbor as a verified zero-cost provider and discovers its currently free models automatically; it does not enable paid Token Harbor models. citeturn0search8turn0search2
+
+Set the key as `TOKENHARBOR_API_KEY`. Do not commit the key to the repository. The free allowance is value-based over a rolling 7×24-hour period rather than a fixed request count, and Token Harbor currently states that there is no separate per-minute request cap for the free program. citeturn0search2
+
+For an Agent deployment, the important values are:
+
+```text
+TOKENHARBOR_API_KEY=<your-key>
+Base URL: https://tokenharbor.ai/v1
+Model: deepseek-v4.1-flash:free
+```
+
+The shared OpenAI-compatible adapter passes tool calls through to the model, so the model can participate in the normal plan → execute → test → review → repair loop. Token Harbor's current documentation states that its supported DeepSeek Flash routes provide tool calls and a 1M-token context window. citeturn0search1
+
+The repository's Smart Router still enforces the project's zero-cost policy. If Token Harbor removes the free model or the gateway reports a non-free price, that model is not eligible for routing.
 
 Optional runtime controls:
 
@@ -114,7 +133,7 @@ Recommended production values:
 Optional:
 
 - `AGENT_REDIS_URL` — Railway Redis connection URL for distributed queue/event bus.
-- Provider API keys such as `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, and `MISTRAL_API_KEY`.
+- Provider API keys such as `TOKENHARBOR_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, and `MISTRAL_API_KEY`.
 
 Do not commit any of these secrets. The worker callback secret must match between the control plane and the GitHub Actions repository secret `AGENT_CALLBACK_TOKEN`.
 
