@@ -116,11 +116,16 @@ class OpenAICompatibleAdapter:
         raise last_error or RuntimeError("model request failed")
 
     async def generate(self, messages, *, tools=None) -> ModelResponse:
+        # Keep the request on the broadly supported Chat Completions field
+        # `max_tokens`. Some OpenAI-compatible gateways reject the newer
+        # `max_completion_tokens` field instead of ignoring it. This is
+        # especially important for gateway interoperability and failover:
+        # one provider must not be discarded solely because it implements the
+        # older but still widely supported request schema.
         payload = {
             "model": self.model,
             "messages": messages,
             "max_tokens": self.max_tokens,
-            "max_completion_tokens": self.max_tokens,
         }
         if tools:
             payload["tools"] = tools
