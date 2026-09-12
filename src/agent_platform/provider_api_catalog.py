@@ -17,6 +17,7 @@ class ProviderAPIContract:
 # The larger provider registry remains the catalog; this table controls live API use.
 VERIFIED_PROVIDER_APIS: tuple[ProviderAPIContract, ...] = (
     ProviderAPIContract("openrouter", "https://openrouter.ai/api/v1", "/models", "/chat/completions"),
+    ProviderAPIContract("tokenharbor", "https://tokenharbor.ai/v1", "/models", "/chat/completions"),
     ProviderAPIContract("groq", "https://api.groq.com/openai/v1", "/models", "/chat/completions"),
     ProviderAPIContract("mistral", "https://api.mistral.ai/v1", "/models", "/chat/completions"),
     ProviderAPIContract("deepseek", "https://api.deepseek.com", "/models", "/chat/completions"),
